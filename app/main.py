@@ -157,8 +157,26 @@ def approve_expense(
     subject: Subject = Depends(get_current_subject),
 ) -> DecisionResponse:
     expense = get_expense_or_404(expense_id)
+
+    # SECURE ORDER: authorize before performing the protected state change.
     reason = enforce(subject, Action.APPROVE_EXPENSE, expense)
     expense.status = ExpenseStatus.APPROVED
+
+    # SECURITY LAB — deliberately vulnerable ordering (keep commented in Git):
+    #
+    # To reproduce the bug later:
+    # 1. Comment out the two secure lines above.
+    # 2. Uncomment the two lines below.
+    # 3. Run:
+    #    python -m pytest -v \
+    #      tests/test_api.py::test_denied_approval_does_not_change_expense_state
+    #
+    # The endpoint returns 403 for an unauthorized manager, but the expense has
+    # already been changed to APPROVED because the side effect happened first.
+    #
+    # expense.status = ExpenseStatus.APPROVED
+    # reason = enforce(subject, Action.APPROVE_EXPENSE, expense)
+
     return DecisionResponse(
         expense=serialize_expense(expense),
         authorization_reason=reason,
