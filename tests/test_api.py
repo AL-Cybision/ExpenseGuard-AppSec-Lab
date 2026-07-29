@@ -1,6 +1,8 @@
 from fastapi.testclient import TestClient
 
+from app.data import EXPENSES
 from app.main import app
+from app.models import ExpenseStatus
 
 
 client = TestClient(app)
@@ -43,3 +45,11 @@ def test_manager_can_approve_departmental_submitted_expense():
 def test_manager_cannot_approve_own_expense():
     response = client.post("/expenses/103/approve", headers={"X-User-ID": "2"})
     assert response.status_code == 403
+
+
+def test_denied_approval_does_not_change_expense_state():
+    """A denied request must not produce the protected business side effect."""
+    response = client.post("/expenses/102/approve", headers={"X-User-ID": "3"})
+
+    assert response.status_code == 403
+    assert EXPENSES[102].status == ExpenseStatus.SUBMITTED
