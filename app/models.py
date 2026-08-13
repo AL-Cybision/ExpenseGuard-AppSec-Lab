@@ -44,6 +44,16 @@ class Subject:
 
 
 @dataclass
+class UserAccount:
+    """Authentication data associated with a human principal."""
+
+    user_id: int
+    email: str
+    password_hash: str
+    is_active: bool = True
+
+
+@dataclass
 class Expense:
     """A reimbursement request created by an employee."""
 
