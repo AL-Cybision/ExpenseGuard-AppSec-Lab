@@ -1,3 +1,5 @@
+from datetime import datetime, timedelta, timezone
+
 from argon2 import PasswordHasher
 from fastapi.testclient import TestClient
 
@@ -17,8 +19,22 @@ TEST_PASSWORD = "ExpenseGuard Test Password 2026"
 DEMO_EMAIL = "noman@example.com"
 DEMO_PASSWORD = "Noman Demo Password 2026"
 GENERIC_LOGIN_ERROR = {"detail": "Invalid email or password."}
+GENERIC_BEARER_ERROR = {"detail": "Invalid or missing authentication credentials."}
 
 client = TestClient(app)
+
+
+def login_demo_user() -> str:
+    response = client.post(
+        "/auth/login",
+        json={"email": DEMO_EMAIL, "password": DEMO_PASSWORD},
+    )
+    assert response.status_code == 200
+    return response.json()["access_token"]
+
+
+def bearer_headers(raw_token: str) -> dict[str, str]:
+    return {"Authorization": f"Bearer {raw_token}"}
 
 
 def test_hash_password_does_not_return_plaintext():
@@ -207,3 +223,104 @@ def test_successful_login_upgrades_outdated_password_hash():
         assert password_needs_rehash(account.password_hash) is False
     finally:
         ACCOUNTS.pop(email, None)
+
+
+def test_valid_bearer_token_resolves_authenticated_subject():
+    raw_token = login_demo_user()
+
+    response = client.get("/whoami", headers=bearer_headers(raw_token))
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["user_id"] == 1
+    assert body["principal_id"] == "user:1"
+    assert body["role"] == "employee"
+
+
+def test_missing_bearer_token_is_401():
+    response = client.get("/whoami")
+
+    assert response.status_code == 401
+    assert response.json() == GENERIC_BEARER_ERROR
+    assert response.headers["www-authenticate"] == "Bearer"
+
+
+def test_invalid_bearer_token_is_401():
+    response = client.get(
+        "/whoami",
+        headers=bearer_headers("not-a-real-expenseguard-session-token"),
+    )
+
+    assert response.status_code == 401
+    assert response.json() == GENERIC_BEARER_ERROR
+
+
+def test_expired_session_is_rejected():
+    raw_token = login_demo_user()
+    session = SESSIONS[hash_session_token(raw_token)]
+    session.expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+
+    response = client.get("/whoami", headers=bearer_headers(raw_token))
+
+    assert response.status_code == 401
+    assert response.json() == GENERIC_BEARER_ERROR
+
+
+def test_revoked_session_is_rejected():
+    raw_token = login_demo_user()
+    session = SESSIONS[hash_session_token(raw_token)]
+    session.revoked_at = datetime.now(timezone.utc)
+
+    response = client.get("/whoami", headers=bearer_headers(raw_token))
+
+    assert response.status_code == 401
+    assert response.json() == GENERIC_BEARER_ERROR
+
+
+def test_account_disabled_after_login_invalidates_existing_session():
+    account = ACCOUNTS[DEMO_EMAIL]
+    original_state = account.is_active
+    raw_token = login_demo_user()
+    account.is_active = False
+
+    try:
+        response = client.get("/whoami", headers=bearer_headers(raw_token))
+
+        assert response.status_code == 401
+        assert response.json() == GENERIC_BEARER_ERROR
+    finally:
+        account.is_active = original_state
+
+
+def test_x_user_id_cannot_override_authenticated_principal():
+    raw_token = login_demo_user()
+
+    response = client.get(
+        "/whoami",
+        headers={
+            "Authorization": f"Bearer {raw_token}",
+            "X-User-ID": "4",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["user_id"] == 1
+    assert response.json()["role"] == "employee"
+
+
+def test_logout_revokes_session_and_same_token_cannot_be_reused():
+    raw_token = login_demo_user()
+    token_hash = hash_session_token(raw_token)
+
+    logout_response = client.post(
+        "/auth/logout",
+        headers=bearer_headers(raw_token),
+    )
+
+    assert logout_response.status_code == 200
+    assert logout_response.json() == {"status": "logged_out"}
+    assert SESSIONS[token_hash].revoked_at is not None
+
+    reused = client.get("/whoami", headers=bearer_headers(raw_token))
+    assert reused.status_code == 401
+    assert reused.json() == GENERIC_BEARER_ERROR
