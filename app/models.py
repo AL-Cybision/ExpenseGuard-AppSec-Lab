@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from datetime import datetime
 from enum import StrEnum
 
 
@@ -51,6 +52,19 @@ class UserAccount:
     email: str
     password_hash: str
     is_active: bool = True
+
+
+@dataclass
+class Session:
+    """Server-side state for an authenticated user session."""
+
+    session_id: str
+    user_id: int
+    token_hash: str
+    created_at: datetime
+    expires_at: datetime
+    revoked_at: datetime | None = None
+    mfa_authenticated: bool = False
 
 
 @dataclass
