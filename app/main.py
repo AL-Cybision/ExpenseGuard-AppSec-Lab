@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 
 from app.authentication import (
     DUMMY_PASSWORD_HASH,
+    extract_bearer_token,
     generate_session_token,
     hash_password,
     hash_session_token,
@@ -19,6 +20,7 @@ from app.models import Action, Expense, ExpenseStatus, Principal, Session, Subje
 
 
 SESSION_LIFETIME = timedelta(hours=8)
+AUTHENTICATION_ERROR_DETAIL = "Invalid or missing authentication credentials."
 
 
 app = FastAPI(
@@ -71,26 +73,57 @@ def serialize_expense(expense: Expense) -> ExpenseResponse:
     )
 
 
+def authentication_error() -> HTTPException:
+    """Return a generic bearer-authentication failure without leaking state."""
+
+    return HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail=AUTHENTICATION_ERROR_DETAIL,
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+
+def get_current_session(
+    authorization: str | None = Header(default=None, alias="Authorization"),
+) -> Session:
+    """Resolve and validate the server-side session for a bearer credential."""
+
+    raw_token = extract_bearer_token(authorization)
+    if raw_token is None:
+        raise authentication_error()
+
+    token_hash = hash_session_token(raw_token)
+    session = SESSIONS.get(token_hash)
+    if session is None:
+        raise authentication_error()
+
+    now = datetime.now(timezone.utc)
+    if session.revoked_at is not None or now >= session.expires_at:
+        raise authentication_error()
+
+    return session
+
+
 def get_current_subject(
-    x_user_id: int = Header(
-        ...,
-        alias="X-User-ID",
-        description=(
-            "Learning-only identity selector. This is not real authentication."
-        ),
-    ),
+    session: Session = Depends(get_current_session),
 ) -> Subject:
-    principal: Principal | None = USERS.get(x_user_id)
+    """Construct the active Subject only from a validated server-side session."""
+
+    account = next(
+        (candidate for candidate in ACCOUNTS.values() if candidate.user_id == session.user_id),
+        None,
+    )
+    if account is None or not account.is_active:
+        raise authentication_error()
+
+    principal: Principal | None = USERS.get(session.user_id)
     if principal is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Unknown user. Supply a valid X-User-ID header.",
-        )
+        raise authentication_error()
 
     return Subject(
         principal=principal,
-        session_id=f"lab-session-{uuid4()}",
-        mfa_authenticated=False,
+        session_id=session.session_id,
+        mfa_authenticated=session.mfa_authenticated,
     )
 
 
@@ -148,6 +181,12 @@ def login(payload: LoginRequest) -> LoginResponse:
     return LoginResponse(access_token=raw_token)
 
 
+@app.post("/auth/logout")
+def logout(session: Session = Depends(get_current_session)) -> dict[str, str]:
+    session.revoked_at = datetime.now(timezone.utc)
+    return {"status": "logged_out"}
+
+
 @app.get("/whoami")
 def whoami(subject: Subject = Depends(get_current_subject)) -> dict[str, object]:
     principal = subject.principal
@@ -158,7 +197,7 @@ def whoami(subject: Subject = Depends(get_current_subject)) -> dict[str, object]
         "role": principal.role,
         "department": principal.department,
         "session_id": subject.session_id,
-        "warning": "X-User-ID is a learning stub, not real authentication.",
+        "mfa_authenticated": subject.mfa_authenticated,
     }
 
 
