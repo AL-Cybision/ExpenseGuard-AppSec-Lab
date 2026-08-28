@@ -1,4 +1,4 @@
-from app.models import Expense, ExpenseStatus, Principal, Role
+from app.models import Expense, ExpenseStatus, Principal, Role, Session, UserAccount
 
 
 USERS: dict[int, Principal] = {
@@ -31,6 +31,48 @@ USERS: dict[int, Principal] = {
         department="security",
     ),
 }
+
+
+# Development-only demo accounts. Only password hashes are stored here; the
+# matching plaintext test credentials exist in the test suite, not this store.
+ACCOUNTS: dict[str, UserAccount] = {
+    "noman@example.com": UserAccount(
+        user_id=1,
+        email="noman@example.com",
+        password_hash=(
+            "$argon2id$v=19$m=65536,t=3,p=4$1IVrVrkVD7ewXTS4tq1wNw$"
+            "Y+EthFIdOgs8B3d2plHMK8bQd3gQcpJ4Xnx8F37zYbY"
+        ),
+    ),
+    "aisha@example.com": UserAccount(
+        user_id=2,
+        email="aisha@example.com",
+        password_hash=(
+            "$argon2id$v=19$m=65536,t=3,p=4$PYPBVZdfc4sOZSdZ56QhwA$"
+            "rxipX/jC5PDQv8NiPLfDfw13JAJM1gBsMf+asCSpZiw"
+        ),
+    ),
+    "bilal@example.com": UserAccount(
+        user_id=3,
+        email="bilal@example.com",
+        password_hash=(
+            "$argon2id$v=19$m=65536,t=3,p=4$lHKtn9jzeQgCT/svACPT2Q$"
+            "ZRVP+AsQYh8MmmL1OAuv12e1MITxF/OJ9Fz6qCSdIdo"
+        ),
+    ),
+    "admin@example.com": UserAccount(
+        user_id=4,
+        email="admin@example.com",
+        password_hash=(
+            "$argon2id$v=19$m=65536,t=3,p=4$71dqnTvJs1JmpqiKUJH16A$"
+            "wkXGPJ08ZcnvJuBxC1pWGs73WU99ViqMFqKS+ln8jXQ"
+        ),
+    ),
+}
+
+
+# Keyed by SHA-256(raw bearer token), never by the raw bearer token itself.
+SESSIONS: dict[str, Session] = {}
 
 
 EXPENSES: dict[int, Expense] = {
