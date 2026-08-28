@@ -51,3 +51,20 @@ def hash_session_token(raw_token: str) -> str:
     """Hash a high-entropy session token for server-side lookup and storage."""
 
     return hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+
+
+def extract_bearer_token(authorization: str | None) -> str | None:
+    """Return a bearer credential from an Authorization header, if well formed."""
+
+    if authorization is None:
+        return None
+
+    parts = authorization.split()
+    if len(parts) != 2:
+        return None
+
+    scheme, token = parts
+    if scheme.lower() != "bearer" or not token:
+        return None
+
+    return token
