@@ -1,11 +1,24 @@
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, Header, HTTPException, status
 from pydantic import BaseModel, Field
 
+from app.authentication import (
+    DUMMY_PASSWORD_HASH,
+    generate_session_token,
+    hash_password,
+    hash_session_token,
+    normalize_email,
+    password_needs_rehash,
+    verify_password,
+)
 from app.authorization import authorize
-from app.data import EXPENSES, USERS
-from app.models import Action, Expense, ExpenseStatus, Principal, Subject
+from app.data import ACCOUNTS, EXPENSES, SESSIONS, USERS
+from app.models import Action, Expense, ExpenseStatus, Principal, Session, Subject
+
+
+SESSION_LIFETIME = timedelta(hours=8)
 
 
 app = FastAPI(
@@ -16,6 +29,16 @@ app = FastAPI(
         "authorization, and secure application design."
     ),
 )
+
+
+class LoginRequest(BaseModel):
+    email: str = Field(min_length=3, max_length=320)
+    password: str = Field(min_length=1, max_length=1024)
+
+
+class LoginResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
 
 
 class ExpenseCreate(BaseModel):
@@ -88,6 +111,41 @@ def enforce(subject: Subject, action: Action, expense: Expense) -> str:
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.post("/auth/login", response_model=LoginResponse)
+def login(payload: LoginRequest) -> LoginResponse:
+    email = normalize_email(payload.email)
+    account = ACCOUNTS.get(email)
+
+    password_hash = (
+        account.password_hash if account is not None else DUMMY_PASSWORD_HASH
+    )
+    password_valid = verify_password(password_hash, payload.password)
+
+    if account is None or not password_valid or not account.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid email or password.",
+        )
+
+    if password_needs_rehash(account.password_hash):
+        account.password_hash = hash_password(payload.password)
+
+    raw_token = generate_session_token()
+    token_hash = hash_session_token(raw_token)
+    created_at = datetime.now(timezone.utc)
+
+    session = Session(
+        session_id=str(uuid4()),
+        user_id=account.user_id,
+        token_hash=token_hash,
+        created_at=created_at,
+        expires_at=created_at + SESSION_LIFETIME,
+    )
+    SESSIONS[token_hash] = session
+
+    return LoginResponse(access_token=raw_token)
 
 
 @app.get("/whoami")
