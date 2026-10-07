@@ -1,6 +1,6 @@
 # Learning — ExpenseGuard AppSec & DevSecOps
 
-> **Living learning notebook / source of truth for concepts.** Updated: **2026-10-03**. This records what we learned, why it matters, and what is **implemented versus planned**. For onboarding and diagrams, see [README.md](README.md). For the real state of CI, consult the [GitHub Actions runs](https://github.com/AL-Cybision/ExpenseGuard-AppSec-Lab/actions); a green workflow can contain a skipped scanner.
+> **Living learning notebook / source of truth for concepts.** Updated: **2026-10-07**. This records what we learned, why it matters, and what is **implemented versus planned**. For onboarding and diagrams, see [README.md](README.md). For the real state of CI, consult the [GitHub Actions runs](https://github.com/AL-Cybision/ExpenseGuard-AppSec-Lab/actions); a green workflow can contain a skipped scanner.
 >
 > **Learning rule:** For each control, explain **problem → attacker scenario → implementation → verification → remaining risk**. A scanner alert is a lead to investigate, not proof of exploitability; a passing scan is not proof of security.
 
@@ -20,24 +20,25 @@
 - **SAST (Semgrep):** Reads source and configuration without running the app; flags risky patterns/data flow and IaC/CI configuration. Review attacker control, source/sink, reachability and existing controls.
 - **SCA (pip-audit, Semgrep Supply Chain):** Finds known advisories in third-party dependencies. **Direct** = explicitly declared (FastAPI, pytest); **transitive** = installed through another package (Starlette via FastAPI). CVE presence does not guarantee the affected feature is reachable.
 - **Secret scan (Gitleaks):** Searches for committed credentials; full Git history matters. If a real key was committed, **revoke/rotate it**, even if later deleted from the current file.
-- **Docker build (planned):** Packages the app, runtime and dependencies into an executable image. A successful build proves it built, not that it is secure.
-- **Container scan (Trivy, planned):** Scans the **built image** for vulnerable OS and application packages; image scanning complements source SCA.
+- **Docker build (implemented):** Packages the app, runtime and dependencies into an executable image. A successful build proves it built, not that it is secure.
+- **Container scan (Trivy, implemented):** Scans the **built image** for vulnerable OS and application packages; image scanning complements source SCA.
 - **IaC scan (Checkov / Trivy IaC, planned):** Scans infrastructure definitions (e.g., public database, wildcard IAM, public S3, unencrypted resources).
-- **SBOM (Syft / Trivy, planned):** Software Bill of Materials: component inventory (SPDX/CycloneDX), useful for identifying affected artifacts after new advisories. An SBOM is not a security scan or fix.
+- **SBOM (Trivy, implemented):** Software Bill of Materials: component inventory. ExpenseGuard now emits CycloneDX 1.6; it helps identify affected artifacts after new advisories, but an SBOM is not itself a security scan or fix.
 - **DAST (OWASP ZAP, planned):** Tests the **running** API over HTTP. Dynamic behavior differs from SAST's source inspection; authenticated coverage and safe staging matter.
 - **Security gate:** CI checks can fail on defined risks; a **required status check / branch rule** must be configured to actually prevent merging. Separate **finding severity**, business risk and exploitability. Do not make every low-confidence alert a permanent blocker.
 - **Exception / risk acceptance:** Document finding, cause, environment, compensating controls, owner, approver and expiration; recheck later. Suppressing an alert silently is **not** risk acceptance.
 - **Parallel execution:** Existing ExpenseGuard GitHub Actions run as **separate workflows**, not as the future linear build → scan → deploy pipeline.
 
-### Verified CI state (commit `ec3b0f7`, checked 2026-10-03)
+### Verified CI state (latest milestones checked through 2026-10-07)
 
 | Check | What was observed | Important limit |
 | --- | --- | --- |
 | Pytest / Python 3.12 | **36 passed** | A regression suite is not a full penetration test. |
 | pip-audit | **No known vulnerabilities found** for resolved requirements | Depends on advisory data and evaluated dependencies at scan time. |
 | Gitleaks | **Workflow passed** | No guarantee every possible credential was recognized. |
-| Semgrep GitHub CI | **Failed: `SEMGREP_APP_TOKEN` missing** | Authenticated local Semgrep scanning was performed previously; GitHub CI still needs secret configuration. |
+| Semgrep GitHub CI | **Operational**; verified Oct 3 authenticated run reported 0 findings | Zero findings on one revision is not proof the application is secure. |
 | SonarQube workflow | **Workflow passed; actual SonarQube scan skipped** | Requires `SONAR_TOKEN` and project/organization variables before counting it as operational. |
+| Container Security | **Build + hardened smoke test + Trivy + SBOM passed** at `cfbcc70` | Full Trivy report still contained 171 findings; the gate passed because no HIGH/CRITICAL finding had a fix available. |
 
 ## 3. Three supply-chain decisions we implemented
 
@@ -56,7 +57,23 @@
 - **Important nuance:** [FastAPI's own versioning guide](https://fastapi.tiangolo.com/deployment/versions/) generally advises **against directly pinning Starlette**; let FastAPI declare its compatible range. Our direct pin was a **targeted remediation**, not universal best practice. A better long-term practice is to declare actual direct dependencies deliberately and use a reviewed **complete lock file with hashes** for repeatable resolved builds.
 - **Difference:** A **version pin** selects a package release, a **commit-SHA pin** selects Git code, and a **lock file** records the full resolved dependency graph. None automatically prove package trustworthiness.
 
-## 4. IAM, authentication, and authorization in ExpenseGuard
+## 4. Container security — what we just implemented
+
+- **Insecure vs hardened image:** `Dockerfile.insecure` intentionally uses a floating base, root execution, broad copy and development dependencies. The default `Dockerfile` is the deployable path.
+- **Base-image digest pinning:** `python:3.12.15-slim-trixie@sha256:...` keeps a readable tag but Docker selects the immutable manifest digest. This prevents a mutable tag from silently changing our base image; the digest must still be reviewed/upgraded for security patches.
+- **Multi-stage build:** dependencies are prepared in a builder stage and only runtime files are copied to the final stage. This reduces build tooling and attack surface in the shipped image.
+- **Runtime vs dev dependencies:** `requirements-runtime.txt` contains only packages the API needs. `requirements.txt` adds pytest/httpx/coverage for development. Test tools should not be present in production just because CI needs them.
+- **`.dockerignore`:** keeps Git metadata, virtualenvs, tests, local environment files, private-key/certificate patterns and other unnecessary files out of the Docker build context. It reduces accidental inclusion; it is not a substitute for secret management.
+- **Non-root user:** image runs as UID/GID 10001. Root inside a container is not automatically host root, but removing unnecessary root privilege reduces impact if the application is compromised.
+- **Read-only filesystem:** CI runs the image with `--read-only` and only an explicit temporary `/tmp` filesystem. This limits persistence/tampering paths.
+- **Capabilities and privilege:** `--cap-drop=ALL` and `no-new-privileges` reduce kernel privileges available to the process. Resource limits cap PIDs, memory and CPU.
+- **Health check:** confirms the service actually reaches a useful running state; it is an availability/operation signal, not a security proof.
+- **Trivy result (2026-10-07, `cfbcc70`):** 171 total findings = 62 LOW + 63 MEDIUM + 44 HIGH + 2 UNKNOWN + 0 CRITICAL. The 44 HIGH findings had no fixed version in the report. Our blocking gate ignores unfixed items and fails only on **fixable HIGH/CRITICAL** vulnerabilities; the full JSON report still records everything.
+- **Why that gate?** A policy that blocks on vulnerabilities with no upstream fix can permanently stop delivery without offering an actionable remediation. We still triage/track them, while fixable HIGH/CRITICAL findings block. This is a policy choice that should change with threat model, exposure and organizational risk appetite.
+- **SBOM evidence:** Trivy generated **CycloneDX 1.6 with 113 components**. The SBOM and full JSON vulnerability report are uploaded as a short-lived CI artifact.
+- **Big lesson:** **green CI ≠ zero vulnerabilities**. Green means the current policy was satisfied. Always read what the policy actually gates.
+
+## 5. IAM, authentication, and authorization in ExpenseGuard
 
 - **IAM (identity and access management):** Who are the actors, how are they authenticated, and which resources/actions are permitted?
 - **Principal:** Identity (e.g., a user). **Subject:** Principal in the context of the *current validated session*. **Authentication (AuthN):** Prove identity; **authorization (AuthZ):** Decide which action on which resource is allowed.
@@ -69,28 +86,28 @@
 - **API6 (unrestricted access to sensitive business flows) vs BOLA:** With BOLA the attacker accesses an **unauthorized object**; API6 may abuse a **legitimately accessible workflow** at harmful scale or in an unintended sequence (e.g., automated mass purchases). Rate limits, anti-automation and business-flow controls complement AuthZ.
 - **Not yet implemented:** Password reset and secure reset links, tenant isolation, MFA enforcement, OAuth/OIDC token validation and production persistence. **Host-header poisoning** matters for password reset: never derive a sensitive reset URL from an untrusted HTTP Host header; use an approved canonical origin.
 
-## 5. Threat modeling, secure development, and the cloud roadmap
+## 6. Threat modeling, secure development, and the cloud roadmap
 
 - **Asset:** What needs protection (account, expense, receipt, credentials). **Actor/entry point:** Who can interact and where (client → API, GitHub → Actions, app → cloud services). **Trust boundary:** Where untrusted input crosses into a privileged component.
 - **DFD (data-flow diagram):** Shows systems, processes, data stores and flows. **STRIDE:** Spoofing, Tampering, Repudiation, Information Disclosure, Denial of Service, Elevation of Privilege. Add abuse cases, risk owners and mitigations.
 - **Secure code review:** Trace **source → transformations/validation → sensitive sink**; assess controls and reachability. Write developer-friendly findings: scenario, root cause, severity rationale, secure fix, regression test and verification.
 - **SSDLC:** Security requirements, design review, PR checklist, tests, release gates, production logging, vulnerability response and time-limited exception handling across the software lifecycle.
-- **Container hardening (planned):** Small maintained base image, pinned images/dependencies, multi-stage build where useful, `.dockerignore`, non-root user, no baked-in secrets, read-only filesystem where workable, dropped capabilities, resource limits and Trivy scans.
+- **Container hardening (implemented baseline):** Digest-pinned slim Python base, multi-stage build, runtime-only dependencies, `.dockerignore`, non-root user, read-only runtime test, dropped capabilities, no-new-privileges, resource limits, health check, Trivy report and CycloneDX SBOM.
 - **AWS target (not deployed):** Internet → public ALB → private ECS Fargate (FastAPI) → private RDS PostgreSQL; S3 for receipts, Secrets Manager for credentials, ECR for images, CloudWatch for application logs and CloudTrail for AWS API auditing.
 - **AWS IAM:** Roles, policies and trust relationships determine *who can assume a role* and *what the role can do*. Aim for temporary credentials; **GitHub OIDC → restricted AWS deployment role** instead of long-lived AWS keys.
 - **Terraform/IaC (planned):** Infrastructure stored/reviewed as code. Check public network exposure, permissive security groups, wildcard IAM, missing encryption/logging and hardcoded secrets. Run `terraform validate` and `terraform plan` before any approved `apply`; obtain cost approval first.
 - **Why ECS before Kubernetes?** Prioritize application/cloud IAM and deployment boundaries without taking on a cluster-management project. Kubernetes RBAC/service accounts/NetworkPolicy/pod security are **stretch topics**.
 - **AI Product Security (later):** Optional policy assistant gives realistic prompt-injection, RAG cross-tenant leakage, unauthorized tool actions and retrieval poisoning scenarios; not a current feature.
 
-## 6. Quick reference / next learning steps
+## 7. Quick reference / next learning steps
 
 ~~~text
 Current:    Local FastAPI + demo memory store + tested AuthN/AuthZ
-CI passing: Pytest / Gitleaks / pip-audit (on Oct 3 checkpoint)
-CI pending: Semgrep platform token; real SonarQube scanner configuration
-Next:      Docker hardening → Trivy image findings and validation
-Then:      secure app features → tenant isolation → threat model/SSDLC
-Then:      SBOM/IaC/Terraform → AWS IAM/ECS/RDS/S3 → optional AI security
+CI passing: Pytest / Gitleaks / pip-audit / authenticated Semgrep
+Container:  hardened Docker build + Trivy report + CycloneDX SBOM + fixable HIGH/CRITICAL gate
+CI pending: real SonarQube scanner configuration; broader required-check policy
+Next:      threat modeling + SSDLC, then Terraform/IaC + AWS/IAM
+Later:     secure app features / tenant isolation / DAST / optional AI security
 ~~~
 
 Useful commands (inside the project directory):

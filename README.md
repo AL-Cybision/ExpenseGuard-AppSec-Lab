@@ -4,7 +4,7 @@
 
 ExpenseGuard is a hands-on **Application Security (AppSec) / DevSecOps** portfolio project. It models employee expense reimbursement: an employee asks their employer to repay an eligible work expense, and an authorized manager reviews that request. The goal is not to build a commercial expense product. It is to show *why* security controls exist, *where* they belong, *how* they can fail, and *how* engineers test them.
 
-> **Project maturity:** Working Python/FastAPI learning application with in-memory data and automated tests; several security checks run in GitHub Actions. **Not a production service, not deployed to AWS, and not yet containerized.** The architecture and cloud sections below distinguish current functionality from planned work.
+> **Project maturity:** Working Python/FastAPI learning application with in-memory data and automated tests; security checks run in GitHub Actions. A hardened Docker image, Trivy image scanning and CycloneDX SBOM generation are now implemented in CI. **This is still not a production service and is not deployed to AWS.** The architecture and cloud sections below distinguish current functionality from planned work.
 
 ## Start here: the project in 60 seconds
 
@@ -12,10 +12,10 @@ ExpenseGuard is a hands-on **Application Security (AppSec) / DevSecOps** portfol
 | --- | --- |
 | What does it do? | Employees create and submit expense reimbursement requests; managers approve or reject requests within their department. |
 | What does it teach? | Authentication, authorization, secure code review, security testing, vulnerability triage, CI/CD security, and eventually containers/cloud security. |
-| What is running today? | A local **FastAPI REST API**, Python business/security logic, demo users/expenses, and a test suite. |
+| What is running today? | A local **FastAPI REST API**, Python business/security logic, demo users/expenses, a test suite, and a hardened Docker image that is built/tested in CI. |
 | Where is the data? | **Python dictionaries in process memory**. Restarting the server loses new data/sessions; there is **no database yet**. |
 | Can I log in? | Yes: a demo login issues an opaque bearer session token; the old `X-User-ID` learning stub **does not authenticate** users. |
-| Does GitHub deploy it? | **No.** Existing GitHub Actions test/scan source code. A build-and-deploy pipeline is planned. |
+| Does GitHub deploy it? | **No.** GitHub Actions now test source code and build/scan the Docker image, but there is **no deployment job** yet. |
 | Is AWS live? | **No.** The AWS diagram is a target design, not existing infrastructure. |
 
 ### A simple business example
@@ -109,8 +109,11 @@ For example: **changing an expense ID** must not let an employee view someone el
 | **pip-audit** | Python dependency analysis (SCA) | Checks dependency versions against known advisories. |
 | **Dependabot** | Dependency/action update proposals | Helps keep dependencies current through reviewable PRs. |
 | **SonarQube Cloud** | Additional analysis and coverage dashboard | Configured as an optional integration; **actual scans are not yet active**. |
+| **Docker** | Packages the API and runtime dependencies | Makes the deployable artifact explicit and repeatable; the default image runs as non-root. |
+| **Trivy** | Scans the built image for known OS/Python vulnerabilities | Checks the artifact that would actually be shipped, not only source dependencies. |
+| **CycloneDX SBOM** | Inventories packages/components inside the image | Gives a machine-readable component list for later vulnerability and incident response. |
 
-**Planned, not yet implemented:** PostgreSQL + SQLAlchemy/Alembic (persistent database and migrations), Docker (packaging), Trivy (image scanning), Checkov (Terraform/IaC scanning), Syft or Trivy SBOM (component inventory), OWASP ZAP (dynamic testing), Terraform and AWS services.
+**Planned, not yet implemented:** PostgreSQL + SQLAlchemy/Alembic (persistent database and migrations), Checkov (Terraform/IaC scanning), OWASP ZAP (dynamic testing), Terraform and AWS services.
 
 ## 4. Run ExpenseGuard locally
 
@@ -187,7 +190,7 @@ The original lab used `X-User-ID` as a teaching shortcut. **That header no longe
 
 A developer changes code, commits it, and opens a **pull request** to propose a change. **GitHub Actions** reads YAML workflows in `.github/workflows/` and runs automated checks.
 
-**Important implementation detail:** In this repository, the current checks are **separate workflows triggered in parallel**, not one linear pipeline. They run on pushes to `main` and `learning/**`, on PRs into `main`, and by manual dispatch. They do **not** yet build containers, deploy applications, or enforce a centralized release policy.
+**Important implementation detail:** In this repository, the checks are **separate workflows triggered in parallel**, not one linear release pipeline. Source-security workflows run broadly; the container workflow is path-filtered to application/container changes. CI now **builds and scans** a Docker image, but it does **not deploy** the application or enforce a centralized release policy yet.
 
 ~~~mermaid
 flowchart TD
@@ -211,10 +214,11 @@ flowchart TD
 | --- | --- | --- | --- |
 | **Unit and security regression tests** | Did a change break application behavior or reintroduce forbidden actions? | `python-tests.yml` | Runs Pytest; **36 tests passed** on the Oct 3 checkpoint. |
 | **Secret scanning** | Did an API key, password or token accidentally enter Git? | `secret-scan.yml` | Gitleaks scans full Git history; latest job passed. A successful job is **not proof every secret is absent**. |
-| **SAST** (static application security testing) | Does code or configuration contain risky patterns? | `semgrep.yml` | Authenticated `semgrep ci` is configured, but the latest run failed because **`SEMGREP_APP_TOKEN` is missing**. Local authenticated analysis previously generated findings. |
+| **SAST** (static application security testing) | Does code or configuration contain risky patterns? | `semgrep.yml` | Authenticated `semgrep ci` is operational; the verified Oct 3 run completed successfully and reported 0 findings for that revision. |
 | **SCA** (software composition analysis) | Are imported third-party packages affected by known advisories? | `sca.yml` | `pip-audit` runs against `requirements.txt`; latest job reported **no known vulnerabilities** after dependency upgrades. |
 | **Coverage and code-quality analysis** | Which application code was tested, and what other problems can static analysis identify? | `sonarqube.yml` | Coverage test step passed; **SonarQube's scanning step was skipped** without required credentials/project variables. |
 | **Dependency maintenance** | Who helps propose updates to Python packages and CI Actions? | `.github/dependabot.yml` | Weekly update checks, 5-PR limits, and explicit 7-day cooldown for routine updates. |
+| **Container build + scan + SBOM** | Is the deployable image hardened, runnable and affected by known package vulnerabilities, and what exactly is inside it? | `container-security.yml` | Builds the digest-pinned, non-root image; smoke-tests it with read-only filesystem/capability restrictions; runs Trivy; uploads a CycloneDX SBOM and JSON scan report; gates fixable HIGH/CRITICAL findings. |
 
 **A scanner alert is evidence to investigate, not automatic proof of exploitability.** For example, the Semgrep review found mutable GitHub Action tags, Dependabot configuration recommendations, and an affected development dependency. We analyzed the root causes rather than calling every alert a remote API vulnerability.
 
@@ -231,11 +235,10 @@ flowchart TD
 
 ### What CI needs before we can call it complete
 
-1. Configure the `SEMGREP_APP_TOKEN` **GitHub Actions repository secret**, then rerun `Semgrep SAST` and inspect actual findings/policy behavior.
-2. Configure SonarQube Cloud's `SONAR_TOKEN` secret and `SONAR_PROJECT_KEY` / `SONAR_ORGANIZATION` variables if we choose to enable that integration; confirm the scanning step really executes and inspect its quality gate.
-3. Prove secret-scanning behavior with a **harmless synthetic test string**, not live credentials; remove test artifacts safely.
-4. Decide and document **severity-based security gates**, required PR checks, false-positive triage, justified exceptions, owners and expiration dates.
-5. Add image, infrastructure, SBOM and dynamic checks as their artifacts/environments become available.
+1. Configure SonarQube Cloud's `SONAR_TOKEN` secret and `SONAR_PROJECT_KEY` / `SONAR_ORGANIZATION` variables if we choose to enable that integration; confirm the scanning step really executes and inspect its quality gate.
+2. Prove secret-scanning behavior with a **harmless synthetic test string**, not live credentials; remove test artifacts safely.
+3. Decide and document broader **severity-based security gates**, required PR checks, false-positive triage, justified exceptions, owners and expiration dates.
+4. Add infrastructure/IaC and dynamic checks as Terraform and a staging environment become available.
 
 ### Configuration: secrets stay out of source code
 
@@ -271,21 +274,19 @@ One real example in this lab: `pytest==8.4.1` and older Starlette dependencies t
 
 **Exception policy (planned):** If a finding cannot be fixed immediately, document its identifier, impact, environment, compensating controls, owner, approver, expiry date and re-review date. A suppression or ignored alert is not an automatic risk acceptance.
 
-## 7. Planned container pipeline: Docker + Trivy
+## 7. Container security: Docker + Trivy (implemented)
 
-A **container image** is a packaged runtime: operating-system libraries, language runtime, dependencies, and application code. Docker makes it easier to run that same package consistently. ExpenseGuard **does not yet contain a completed Docker deployment or Trivy image scan**.
+A **container image** packages the operating-system userspace, language runtime, dependencies and application code. ExpenseGuard keeps an intentionally weak `Dockerfile.insecure` for comparison, while the default `Dockerfile` is the hardened build path.
 
-Proposed sequence:
+The hardened image currently uses a Python 3.12.15 slim base **pinned by digest**, a multi-stage build, a dedicated UID/GID 10001, runtime-only Python dependencies, `.dockerignore`, a health check and no application secrets copied into the image. CI smoke-tests the container using `--read-only`, a small temporary filesystem, `--cap-drop=ALL`, `no-new-privileges`, PID/memory/CPU limits, then runs Trivy.
 
-~~~text
-Change code → pass source/dependency/secret checks
-            → build ExpenseGuard container
-            → run Trivy against built image (OS + language packages)
-            → harden/repair findings and test again
-            → produce and keep a trusted image artifact
-~~~
+Verified on **2026-10-07** at commit `cfbcc70`:
+- image build, non-root check and hardened smoke test: **passed**;
+- Trivy full report: **171 findings** (62 LOW, 63 MEDIUM, 44 HIGH, 2 UNKNOWN, 0 CRITICAL);
+- all 44 HIGH findings in that scan had **no fixed version**, so the current gate—**block fixable HIGH/CRITICAL findings**—passed;
+- CycloneDX **1.6** SBOM generated with **113 components** and uploaded with the JSON Trivy report as a 14-day GitHub Actions artifact.
 
-What we intend to validate: small maintained base image, carefully chosen image digest, multi-stage build where useful, non-root process, `.dockerignore`, no secrets baked into layers, reduced Linux capabilities, read-only filesystem where compatible, health checks, resource limits and a clean Trivy review. A **Docker build succeeding does not mean the image is secure**.
+This is intentionally a nuanced result: **a green container job does not mean zero vulnerabilities**. The full report remains evidence for triage; the gate represents an explicit release policy, not a claim that unfixed upstream CVEs do not matter.
 
 ## 8. Planned cloud architecture (AWS): **not deployed**
 
@@ -390,8 +391,8 @@ This repository is **an educational security lab**, not a ready-to-run enterpris
 - In-memory sessions and data that do not survive a restart or scale across servers.
 - No production-grade rate limiting, account recovery workflow, production identity provider or comprehensive audit pipeline yet.
 - No receipt upload/storage, tenant separation, TLS termination configuration, production hosting or AWS infrastructure yet.
-- No Docker/Trivy/Checkov/SBOM/ZAP end-to-end pipeline or verified branch-protection/release gate yet.
-- A Semgrep GitHub job that requires its token, and a SonarQube integration whose actual scan was skipped on the latest reviewed run.
+- Docker/Trivy/SBOM are implemented, but Checkov/IaC and ZAP/DAST are not yet integrated; branch-protection/release gates are not yet verified.
+- Authenticated Semgrep CI is operational; SonarQube's actual analysis step is still not operational on the latest reviewed run.
 
 **Security depends on configuration and ongoing review:** even green automated checks cannot prove a system is free of vulnerabilities. The objective is to make concrete, repeatable security evidence and to document tradeoffs and fixes transparently.
 
@@ -418,9 +419,14 @@ tests/
     semgrep.yml            Semgrep AppSec Platform CI
     sca.yml                pip-audit dependency scanning
     sonarqube.yml          Coverage and conditional SonarQube analysis
+    container-security.yml Docker build, hardened smoke test, Trivy and SBOM
   dependabot.yml           Package / Action update policy
 
-requirements.txt           Pinned direct Python dependencies
+requirements-runtime.txt   Runtime-only Python dependencies for container
+requirements.txt           Development/test dependencies + runtime include
+Dockerfile                 Hardened default container image
+Dockerfile.insecure        Educational anti-pattern comparison
+.dockerignore              Removes unnecessary/sensitive build-context files
 sonar-project.properties   SonarQube analysis settings
 README.md                  This guide
 ~~~
@@ -436,4 +442,4 @@ For each proposed security change, try to record: **what could go wrong → how 
 
 ---
 
-*This README intentionally labels planned systems as planned. It will evolve as ExpenseGuard gains real Docker, AWS, Terraform and security-gate implementations.*
+*This README intentionally labels planned systems as planned. It will evolve as ExpenseGuard gains AWS, Terraform, DAST and broader security-gate implementations.*
