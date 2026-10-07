@@ -1,0 +1,13 @@
+# EDUCATIONAL ANTI-PATTERN ONLY — DO NOT DEPLOY.
+# This intentionally keeps several common container mistakes visible for comparison.
+FROM python:3.12
+
+WORKDIR /app
+
+# Broad copy and the full development requirements increase build context and attack surface.
+COPY . .
+RUN pip install -r requirements.txt
+
+# No dedicated non-root USER and no HEALTHCHECK.
+EXPOSE 8000
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

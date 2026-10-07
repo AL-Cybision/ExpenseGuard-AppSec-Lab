@@ -1,7 +1,4 @@
-fastapi==0.142.2
-starlette==1.6.0
-uvicorn[standard]==0.35.0
+-r requirements-runtime.txt
 pytest==9.0.3
 httpx==0.28.1
-argon2-cffi==25.1.0
 pytest-cov==7.1.0
