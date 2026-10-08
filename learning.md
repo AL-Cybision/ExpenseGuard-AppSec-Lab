@@ -176,7 +176,45 @@ docker run -d \
 - **SBOM:** Trivy creates **CycloneDX 1.6**, an inventory of **113 components** at that checkpoint. SBOM ≠ vulnerability scan; it enables future component lookup/incident response. CI uploads the SBOM and full JSON report with **14-day retention**. Current workflow does not itself deploy or enforce required PR branch protection.
 - **Decision principle:** **Green CI ≠ no vulnerabilities.** It means the specified policy passed, and it is important to inspect the full report and the gate criteria.
 
-### 4.9 Reproduce / defend it in an AppSec interview
+### 4.9 SBOM: dependency inventory and supply-chain incident response
+
+**SBOM = Software Bill of Materials.** A machine-readable inventory of software components in a specific artifact, similar to an ingredient list. ExpenseGuard generates a **CycloneDX 1.6** SBOM using Trivy. The verified image contained **113 detected components** in that SBOM. This is a snapshot, **not** continuous monitoring or proof that all software and vulnerabilities were discovered.
+
+| Possible CycloneDX field | Why it matters |
+| --- | --- |
+| `name` and `version` | Identify component and release for impact assessment. |
+| `purl` (Package URL) | Standardize package identity and ecosystem (e.g., PyPI). |
+| `hashes` | Identify package artifacts more precisely *when recorded*. |
+| `licenses` | Support license reviews *when present*. |
+| `dependencies` | Express discovered component relationships *when available*. |
+
+**Illustrative example** (not copied from our generated report):
+
+```json
+{
+  "type": "library",
+  "name": "fastapi",
+  "version": "0.142.2",
+  "purl": "pkg:pypi/fastapi@0.142.2"
+}
+```
+
+**Incident scenario:** A critical advisory appears tomorrow for a library. A company has 70 deployed services. Instead of manually opening each repository, its security team searches stored SBOMs for the **affected package and version**, identifies candidate images/services, then checks whether the vulnerable feature is reachable, what privileges it has and which compensating controls or fixes exist. **A match means investigate; it does not automatically prove exploitability.** A non-match only reduces uncertainty if inventory coverage is complete.
+
+**SBOM vs vulnerability scan:** The SBOM answers **what is in the image?** Trivy's vulnerability report answers **which known advisories match these components right now?** Because vulnerability intelligence changes, retain component inventories and rescan/query them when new advisories emerge—even without a code change.
+
+**How to inspect locally** (example commands; not a claim they were executed locally):
+
+```bash
+docker build -t expenseguard:local .
+trivy image --format cyclonedx --output sbom.cdx.json expenseguard:local
+jq -r '.components[] | [.name, .version, .purl] | @tsv' sbom.cdx.json
+jq '.components[] | select(.name == "fastapi")' sbom.cdx.json
+```
+
+**What we actually implemented:** `.github/workflows/container-security.yml` builds/scans the hardened image, saves `sbom.cdx.json` and `trivy-image.json`, and uploads them as CI artifacts with **14-day retention**. That verifies generation and upload; it is **not a production SBOM registry**, and artifacts are **not yet tied into a deployed-image provenance/inventory service**. Future production work should associate the SBOM with the exact deployed image digest, retain it according to incident-response needs and refresh vulnerability evaluations.
+
+### 4.10 Reproduce / defend it in an AppSec interview
 
 ```bash
 # On the learning branch, from the repository root with Docker available:
@@ -202,7 +240,7 @@ docker stop expenseguard-local
 4. **Why non-root + read-only + dropped capabilities?** Different least-privilege layers constrain identity, filesystem writes and special kernel privileges after RCE.
 5. **Why did a green Trivy job contain 44 HIGH findings?** The full report retained unfixed findings, while our CI gate blocks fixable HIGH/CRITICAL; security policy success is not a vulnerability-free guarantee.
 
-**Milestone boundary:** Docker concepts and the implemented controls above are documented; final SBOM/Trivy interview review is still part of our upcoming lesson. Threat modeling, SSDLC, Terraform, AWS and DAST remain separate workstreams.
+**Milestone status (2026-10-08): Docker + Trivy + SBOM fundamentals COMPLETE.** The hardened image, CI runtime smoke test, full Trivy report, fixable HIGH/CRITICAL gate and generated CycloneDX SBOM were implemented and verified at the recorded checkpoint. The SBOM incident-response discussion, limits and interview review are documented here. **This does not mean production-ready:** complete transitive lockfile/hash management, base-image patch cadence, longer-lived SBOM-to-image-digest provenance, triage of unfixed findings, enforced branch protections and ECS production hardening remain future work. Threat modeling, SSDLC, Terraform, AWS and DAST are separate workstreams; **pause before starting them until the user's discussion is complete.**
 
 ## 5. IAM, authentication, and authorization in ExpenseGuard
 
