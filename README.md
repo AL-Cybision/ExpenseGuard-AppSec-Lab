@@ -327,6 +327,50 @@ flowchart TD
 
 The intended data flow is **Internet → ALB → ECS Fargate → FastAPI → private RDS**, with separate controlled access to S3 and secrets. We will first run `terraform fmt`, `terraform validate`, `terraform plan` and an IaC scan. **Do not run `terraform apply` or launch chargeable AWS services without explicit approval and a cost estimate.**
 
+### AWS IAM and application identities: two authorization layers (design only)
+
+**A human using ExpenseGuard is not automatically an AWS IAM principal.** We deliberately separate:
+
+| Layer | Who is authenticated? | What is authorized? |
+| --- | --- | --- |
+| **ExpenseGuard application** | Employee, manager or application admin via FastAPI login/session | Which specific expense/receipt the user can create, read, approve or download |
+| **AWS IAM** | An ECS **task-role session**, deployment role, administrator or other AWS principal | Which AWS API operation the identity may call on which resource (for example `s3:GetObject` on a receipt prefix) |
+
+**Proposed receipt-download flow (the receipt feature is not implemented yet):**
+
+```mermaid
+sequenceDiagram
+    actor Employee
+    participant API as ExpenseGuard FastAPI (ECS)
+    participant IAM as IAM policy evaluation
+    participant S3 as Private S3 receipts
+    Employee->>API: GET receipt using app bearer token
+    API->>API: Validate session + object-level AuthZ
+    Note over API: Deny other employee's receipt before S3
+    API->>IAM: SDK request signed using temporary ECS task-role credentials
+    IAM-->>API: Allowed or denied for S3 API action
+    API->>S3: GetObject if permitted
+    S3-->>API: Receipt bytes
+    API-->>Employee: Authorized response
+```
+
+The arrows describe **authorization concepts**, not literal standalone HTTP calls to the IAM service: AWS services evaluate applicable authorization policies as part of handling API requests. A green IAM decision alone does **not** prevent BOLA/IDOR; the application must authorize the particular employee and receipt. RDS PostgreSQL additionally needs restricted network connectivity and database authentication (password-based or optionally configured IAM DB authentication).
+
+**Different IAM roles serve different purposes:**
+
+| Proposed role | Who uses it? | Why it needs permission |
+| --- | --- | --- |
+| ECS **task role** | FastAPI application code | Access particular receipt S3 objects and other explicitly approved AWS APIs using temporary task credentials |
+| ECS **task execution role** | ECS/Fargate to start/manage a task | Pull private ECR images, send configured logs, retrieve task-definition secrets |
+| CI **deployment role** | GitHub Actions via OIDC/STS | Deploy approved artifacts with narrowly scoped temporary permissions |
+| Human administrator identity | Trusted staff, not app users | Manage approved AWS resources; avoid routine use of the AWS root account |
+
+**Trust policy versus permissions policy:** The task role's trust relationship determines **who can assume it** (e.g. the ECS tasks service); the permissions policy specifies **what it may do** (e.g. `s3:GetObject` for `arn:aws:s3:::expenseguard-iam-lab-example/receipts/*`). No IAM roles or policies are currently provisioned for ExpenseGuard. We are starting with the IAM **Policy simulator in Custom mode** to test fictional `GetObject` allow versus `DeleteObject` implicit deny before touching real resources. A simulation is not a deployment or an end-to-end authorization test.
+
+**Zero-cost-first lab guardrail (2026-10-14):** The learning AWS account is on a **Paid plan with no remaining credits**. Root MFA and a **zero-spend budget alert** are configured. A budget notification **cannot enforce a $0 hard limit**; no ECS, ECR, RDS, ALB, NAT gateway, S3 objects or other chargeable infrastructure should be created without a separate explicit approval and cost estimate. Only simulator navigation has been demonstrated so far; do not claim successful Allow/Deny simulation results yet.
+
+For policy JSON examples, user-versus-task-role explanations, simulator instructions, limitations and interview Q&A, see [**learning.md — Section 5, AWS IAM**](learning.md#5-aws-iam--expenseguard-mental-model-labs-and-interview-guide). Official guides: [AWS IAM policy evaluation](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_evaluation-logic.html) and [Amazon ECS task and execution roles](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/security-ecs-iam-role-overview.html).
+
 ### Why ECS first, not Kubernetes?
 
 Kubernetes is useful for securing complex cluster-based environments, but it introduces significant operational scope. The primary project targets **AppSec, CI/CD, IAM and cloud architecture**, so ECS Fargate is the planned main deployment. A small local Kubernetes **kind/k3d** workload-security exercise can follow as a stretch project; it is **not** a current feature.
