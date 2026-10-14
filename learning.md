@@ -1,6 +1,6 @@
 # Learning — ExpenseGuard AppSec & DevSecOps
 
-> **Living learning notebook / source of truth for concepts.** Updated: **2026-10-08**. This records what we learned, why it matters, and what is **implemented versus planned**. For onboarding and diagrams, see [README.md](README.md). For the real state of CI, consult the [GitHub Actions runs](https://github.com/AL-Cybision/ExpenseGuard-AppSec-Lab/actions); a green workflow can contain a skipped scanner.
+> **Living learning notebook / source of truth for concepts.** Updated: **2026-10-14**. This records what we learned, why it matters, and what is **implemented versus planned**. For onboarding and diagrams, see [README.md](README.md). For the real state of CI, consult the [GitHub Actions runs](https://github.com/AL-Cybision/ExpenseGuard-AppSec-Lab/actions); a green workflow can contain a skipped scanner.
 >
 > **Learning rule:** For each control, explain **problem → attacker scenario → implementation → verification → remaining risk**. A scanner alert is a lead to investigate, not proof of exploitability; a passing scan is not proof of security.
 
@@ -242,18 +242,225 @@ docker stop expenseguard-local
 
 **Milestone status (2026-10-08): Docker + Trivy + SBOM fundamentals COMPLETE.** The hardened image, CI runtime smoke test, full Trivy report, fixable HIGH/CRITICAL gate and generated CycloneDX SBOM were implemented and verified at the recorded checkpoint. The SBOM incident-response discussion, limits and interview review are documented here. **This does not mean production-ready:** complete transitive lockfile/hash management, base-image patch cadence, longer-lived SBOM-to-image-digest provenance, triage of unfixed findings, enforced branch protections and ECS production hardening remain future work. Threat modeling, SSDLC, Terraform, AWS and DAST are separate workstreams; **pause before starting them until the user's discussion is complete.**
 
-## 5. IAM, authentication, and authorization in ExpenseGuard
+## 5. AWS IAM — ExpenseGuard mental model, labs and interview guide
 
-- **IAM (identity and access management):** Who are the actors, how are they authenticated, and which resources/actions are permitted?
-- **Principal:** Identity (e.g., a user). **Subject:** Principal in the context of the *current validated session*. **Authentication (AuthN):** Prove identity; **authorization (AuthZ):** Decide which action on which resource is allowed.
-- **RBAC:** Assign permissions to roles (`employee`/`manager`/`admin`). **ABAC:** Consider attributes such as department, owner and status. **DAC:** Owner-driven discretion; **MAC:** Centrally enforced security classifications; useful models but not the primary ExpenseGuard policy.
-- **PDP / PEP:** Policy Decision Point evaluates allow/deny; Policy Enforcement Point prevents a disallowed action. ExpenseGuard calls `authorize(...)` **before** modifying expense status.
-- **Least privilege:** Give only necessary access. **Default deny:** Unrecognized actions fail. **Separation of duties (SoD):** A manager cannot approve their own expense. **JIT/JEA:** Time-limited access / only enough privilege for a specific task (concepts, not implemented features).
-- **Password hashing:** Use slow, salted **Argon2id** for passwords, never plain SHA-256. An unknown username triggers a dummy password-hash check to reduce obvious enumeration timing differences.
-- **Opaque bearer session:** Generate a cryptographically random token; return raw token to the client **once**; keep only its SHA-256 hash on the server (appropriate for high-entropy random tokens). Check token existence, expiry, revocation, account activity; logout revokes. Never accept `X-User-ID` as identity.
-- **401 vs 403:** 401 = no valid authentication; 403 = authenticated but permission denied. **BOLA/IDOR:** Changing `/expenses/102` to another person's ID must not bypass object-level checks.
-- **API6 (unrestricted access to sensitive business flows) vs BOLA:** With BOLA the attacker accesses an **unauthorized object**; API6 may abuse a **legitimately accessible workflow** at harmful scale or in an unintended sequence (e.g., automated mass purchases). Rate limits, anti-automation and business-flow controls complement AuthZ.
-- **Not yet implemented:** Password reset and secure reset links, tenant isolation, MFA enforcement, OAuth/OIDC token validation and production persistence. **Host-header poisoning** matters for password reset: never derive a sensitive reset URL from an untrusted HTTP Host header; use an approved canonical origin.
+> **Status on 2026-10-14:** This is a **learning and design reference**, NOT an implemented AWS deployment. A personal AWS account was created, root MFA was enabled, and a zero-spend budget alert was configured. The account is on a **PAID plan with NO remaining credits**. In the IAM console, we opened the **Policy simulator → Custom mode**; we have NOT yet pasted/simulated the example policy or created any IAM role, S3 bucket, ECS service or RDS database for ExpenseGuard. No billable infrastructure is authorized. A zero-spend budget is **an alert, NOT a spending cap**.
+
+### 5.1 The most important mental model: two identity systems, not one
+
+**Question 1 — Application identity:** Who is the human using ExpenseGuard, and which business objects may they access? A user logs in with email/password; FastAPI validates a session and enforces the ExpenseGuard RBAC/ABAC policy. Example: employee A must not download employee B's receipt (**BOLA/IDOR**).
+
+**Question 2 — AWS identity (IAM):** Which AWS principal is making a request to an AWS service, and is that principal permitted to call this API action on this resource? Example: is the ExpenseGuard **task role** permitted to call `s3:GetObject` on the receipts bucket?
+
+A browser client is **not automatically an AWS IAM user**. In our proposed architecture, employees are app identities and the *backend* assumes/receives an AWS role for infrastructure API calls. An S3 request authenticated by the task role does **not** automatically convey the human's application identity to AWS.
+
+```text
+Employee / Manager / App Admin (application identities)
+      |
+      | HTTPS, ExpenseGuard bearer session
+      v
+Public ALB -> Private ECS Fargate task: FastAPI
+             |  1. AuthN: verify app session
+             |  2. AuthZ: authorize user + requested expense/receipt
+             |  3. SDK: AWS API request using task-role credentials
+             v
+        AWS IAM evaluates task-role permissions
+             |
+             +--> S3: receipt objects
+             +--> Secrets Manager: selected application secrets
+             |
+             +--> RDS PostgreSQL: private network + database authentication
+                  (IAM DB authentication is OPTIONAL and not our default assumption)
+```
+
+**Two gates for a receipt:** (A) app authorization for the particular employee/object **AND** (B) AWS authorization for the backend role's S3 API action. A role may access the receipts prefix but cannot enforce per-employee business ownership by itself unless we deliberately design a more complex identity-aware delegation model.
+
+### 5.2 Terminology: Who is an IAM principal or identity?
+
+| Term | Useful meaning | ExpenseGuard example |
+| --- | --- | --- |
+| **AWS account** | Administrative/billing/security boundary that contains AWS resources and IAM configuration | Our paid AWS lab account; not an application user |
+| **IAM user** | Long-lived AWS identity, with policies and potentially long-lived credentials | Avoid as application identity and avoid creating permanent access keys |
+| **IAM role** | AWS identity with permissions and a **trust policy** that defines who may assume it; normally used through temporary credentials | `ExpenseGuardTaskRole`, `ExpenseGuardDeployRole` |
+| **Principal** | An authenticated AWS actor such as an IAM user, assumed-role session, AWS service or federated identity | The assumed ECS task-role session signing an S3 request |
+| **STS (Security Token Service)** | AWS service for issuing temporary security credentials / role sessions | ECS task credentials; external CI using OIDC to assume a deployment role |
+| **Identity-based policy** | Grants/denies actions and resources to an IAM user/group/role | Role allowed `s3:GetObject` on certain objects |
+| **Resource-based policy** | Policy on an AWS resource identifying who may access it (where supported) | S3 bucket policy |
+| **Trust policy** | Special resource-based policy on an IAM role deciding who can assume it | ECS tasks service principal |
+| **Permission boundary / SCP / session policy** | Other constraints that can limit effective permissions | Advanced controls; not needed for our first simulator exercise |
+
+An **IAM role is not the same as an ExpenseGuard application RBAC role**. Our app roles `employee/manager/admin` concern business rules. AWS IAM roles concern permissions to AWS resources.
+
+### 5.3 Why several AWS roles if the application has many users?
+
+Each independent responsibility should receive **only the permissions it needs**:
+
+| Identity / role | Who uses it? | Expected scope (design only) |
+| --- | --- | --- |
+| **Workforce administrator** | A person managing the AWS environment | Administrative operations with MFA; do not use account root routinely |
+| **ExpenseGuard ECS *task role*** | FastAPI application code running inside an ECS task | Selected S3 receipt objects; selected Secrets Manager reads *if code calls Secrets Manager* |
+| **ExpenseGuard ECS *task execution role*** | ECS/Fargate agent/control plane acting to start and support the task | Pull private ECR image, send logs using configured log driver, retrieve secrets referenced by the task definition |
+| **GitHub Actions deployment role** | CI after approved security gates | ECR upload and narrowly scoped ECS deployment operations via OIDC/STS; no stored AWS secret access keys |
+| **Notification service role** | A hypothetical later worker | Only necessary messaging permissions, not broad S3/infra administration |
+
+**Five ECS replicas ≠ five IAM roles.** Several ECS tasks can reference one task role but receive distinct temporary credential sessions. One task may run multiple containers; they can share the permissions granted to the task role. Split unrelated services/tasks when separate AWS privileges are needed.
+
+**ECS, Fargate, Docker:** Docker/OCI image = packaged FastAPI application; **ECS** = orchestration (task definitions, services, desired count, restart/replacement); **Fargate** = AWS-managed compute/runtime for ECS tasks. Our existing Docker image is a candidate for Fargate but hasn't been deployed. Fargate removes host management, **not** IAM, networking, secrets, app or container-security responsibilities.
+
+### 5.4 Trace a real receipt download request end to end
+
+1. **Employee browser** sends `GET /receipts/123` with an ExpenseGuard bearer session (endpoint hypothetical; **receipt feature not implemented yet**).
+2. **FastAPI AuthN** validates the application session and learns which employee is calling.
+3. **FastAPI AuthZ** checks owner/department/status and the receipt-to-expense relationship. If employee A requests employee B's receipt, respond **403 before touching S3**.
+4. If allowed, **backend code** calls Boto3 `s3.get_object(...)` or generates a narrowly scoped short-lived presigned URL. The AWS SDK automatically finds temporary task-role credentials from ECS's supported credentials provider.
+5. **S3 authorizes an AWS API request** using the role/session, action, resource and other applicable policies. The AWS task role is the relevant AWS identity—not the browser user.
+6. Backend streams the response or supplies a presigned URL. Treat a presigned URL as a **temporary bearer capability**: anyone who obtains it may use it while valid; only issue it **after** application authorization.
+
+**Interview failure mode:** `s3:GetObject` on the correct bucket **does not fix BOLA**. App authorization must still check *the particular employee and receipt*. Conversely, good app authorization does not grant the backend any S3 permission if IAM denies it.
+
+**RDS nuance:** Connecting to private PostgreSQL requires correct VPC routing/security groups **and** PostgreSQL database authentication (typically username/password stored securely); IAM authentication of the database is a **separate optional configuration**, not implied by a task role. IAM and network security are complementary but different controls.
+
+### 5.5 The fundamental split: TRUST versus PERMISSIONS policy
+
+**Trust policy = WHO may assume a role.** Example illustrative trust policy for an ECS task role (not attached/deployed):
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Principal": {"Service": "ecs-tasks.amazonaws.com"},
+    "Action": "sts:AssumeRole"
+  }]
+}
+```
+
+This only permits a service principal to assume the role under applicable rules; **it does not grant permission to read S3**. In a production configuration, review AWS-recommended restrictions such as `aws:SourceAccount` and `aws:SourceArn` where supported, to narrow the trust relationship.
+
+**Permissions policy = WHAT the assumed identity may do and ON WHICH resources.** Example *identity-based* permissions policy:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Sid": "ReadReceiptObjectsOnly",
+    "Effect": "Allow",
+    "Action": ["s3:GetObject"],
+    "Resource": "arn:aws:s3:::expenseguard-iam-lab-example/receipts/*"
+  }]
+}
+```
+
+**Read the JSON field by field:**
+
+- `Version`: IAM policy language version, **not the application's version**.
+- `Statement`: One or more policy rules.
+- `Sid`: Optional readable statement identifier.
+- `Effect`: `Allow` or `Deny`.
+- `Action`: AWS API permission (for example `s3:GetObject`).
+- `Resource`: Which ARN (Amazon Resource Name) the rule covers. Here: objects under `receipts/`. This is a **fictional bucket**, not a live resource.
+- `Principal`: Often found in resource/trust policies; typically **not** present in an identity-based policy attached to a role.
+- `Condition`: Optional conditions such as principal attributes, source context or transport requirements; exact support depends on service/action.
+
+**S3 ARN precision:** `s3:GetObject` applies to **object ARNs**, e.g., `arn:aws:s3:::bucket-name/receipts/*`. `s3:ListBucket` uses a **bucket ARN** (`arn:aws:s3:::bucket-name`) and is **not automatically included** by GetObject. Do not use `"Action":"s3:*","Resource":"*"` just to get a lab working.
+
+### 5.6 The authorization decision: implicit deny, explicit deny, and context
+
+Imagine AWS receives:
+
+```text
+Principal: ExpenseGuardTaskRole assumed-role session
+Action:    s3:GetObject
+Resource:  arn:aws:s3:::expenseguard-iam-lab-example/receipts/123.pdf
+Context:   account, request conditions, session, policies, etc.
+```
+
+The useful baseline model is:
+
+- **Implicit deny (default):** No applicable policy grants the operation; access is denied. Example: read-only policy has no `s3:DeleteObject` allow.
+- **Explicit allow:** A matching permission grants access when all applicable policy types/constraints permit it.
+- **Explicit deny:** An applicable `"Effect":"Deny"` overrides an applicable allow.
+- **Effective permissions are not just one attached policy.** AWS may evaluate identity policies, S3 bucket/resource policies, session policies, permissions boundaries and organization policies. The exact combination depends on the principal and request context; a resource-based allow can sometimes grant access even without an identity-based allow. **Do not assume that omitting an action in one identity policy guarantees no other policy can grant it.**
+
+In our **isolated custom-policy simulation**, with only the illustrative `s3:GetObject` allow and no other granting policies:
+
+| Simulated request | Expected result | Why |
+| --- | --- | --- |
+| `s3:GetObject` on `receipts/123.pdf` | **Allowed** | Action and object ARN match |
+| `s3:DeleteObject` on `receipts/123.pdf` | **Implicitly denied** | No allow for deletion |
+| `s3:GetObject` on `other/123.pdf` | **Implicitly denied** | Resource ARN doesn't match |
+
+**Explicit deny variant** (for learning only): a `Deny` for `s3:DeleteObject` can override a separate `Allow`, but adding more policy rules is unnecessary for our first experiment.
+
+### 5.7 Practical, no-infrastructure IAM Policy Simulator lab — NOT YET EXECUTED
+
+**Account constraints:** AWS **Paid plan**, **$0 credits**; root MFA enabled; zero-spend budget alert enabled. **Never mistake a budget alert for a hard cap.** Avoid S3 buckets, ECS tasks, NAT gateways, ALBs, EC2, RDS, CloudWatch paid features and third-party offerings without a separate cost estimate and explicit approval.
+
+**Progress confirmed from the user's AWS console screenshots:** IAM → **Policy simulator** → **Custom** mode selected. Left panel shows `Identity-based policies (0)` with **+ Add policy**. No policy simulation result has been shown yet.
+
+**Next controlled steps** (perform one at a time, with screenshots/verification):
+
+1. In **Custom**, select **+ Add policy** and paste the **fictional S3 read-only identity-based policy** from `5.5`.
+2. Add action `s3:GetObject` and set object resource to `arn:aws:s3:::expenseguard-iam-lab-example/receipts/123.pdf`; simulate. Expected **Allowed**.
+3. Add `s3:DeleteObject` for the same object; simulate. Expected **Implicit deny**.
+4. Change the object ARN to the `other/` prefix and simulate GetObject. Expected **Implicit deny**.
+5. Inspect **Result details**. **Record the actual results only after we perform the simulator run.** Unexpected results require investigating the exact context, not inventing success.
+
+**Why Custom mode?** Tests pasted identity-based policies **without creating/attaching a user or role**. This is an IAM **policy simulation**, not a real S3 API call or proof that the same decision will occur in a complex production environment. The console Custom mode cannot fully simulate arbitrary S3 bucket policies or custom organization SCPs; use appropriate advanced tools and real-world verification later. **No real S3 bucket is needed.**
+
+### 5.8 Security review checklist + common misunderstandings
+
+| Misunderstanding | Correction |
+| --- | --- |
+| "Every ExpenseGuard employee needs an IAM user." | **No.** Ordinary app users authenticate to FastAPI; task role authenticates backend AWS API calls. |
+| "IAM knows which human owns receipt 123." | **Not automatically.** Enforce object ownership in app AuthZ before calling S3. |
+| "Trust policy lets me read S3." | **No.** Trust decides who assumes a role; permissions decide which AWS actions/resources are allowed. |
+| "Task role and execution role are the same." | **No.** App SDK calls use the task role; ECS startup integrations use the execution role. |
+| "Role attached means anyone can use it." | **No.** Trust relationship and the applicable assume-role authorization matter; credentials are temporary. |
+| "Task role grants PostgreSQL network/database access." | **Not by itself.** Network SG routing and database authentication are different requirements. |
+| "A denied action is always explicitly denied." | **No.** Missing matching allow produces **implicit deny**. |
+| "S3 prefix scope isolates human users." | **No.** Backend app must check each employee's object permissions. |
+| "Policy Simulator guarantees runtime behavior." | **No.** It's a model of policies and context, not a live call with all production constraints. |
+| "Our AWS lab can spend credits safely." | **No.** The account is paid and has zero remaining credits. |
+
+**Practical review habits:** Separate people/service/deployment roles; avoid root for daily administration; prefer temporary role credentials over static access keys; minimize actions/resources/conditions; test least privilege with positive and negative cases; check bucket policy and organization constraints; never log raw AWS secrets or app bearer tokens; make IAM + app authorization + network controls complement rather than replace each other.
+
+### 5.9 Existing ExpenseGuard AppSec identity/authentication fundamentals
+
+- **IAM vs application IAM:** AWS IAM manages AWS identities and API permissions. ExpenseGuard's identity model covers users, validated sessions and expense permissions. In both cases **AuthN** establishes an identity and **AuthZ** determines allowed actions.
+- **Principal / subject:** Principal is an identity; in ExpenseGuard the **subject** is the principal represented by the current validated session. In AWS an **assumed-role session** is a principal that makes signed API requests.
+- **RBAC:** `employee`/`manager`/`admin`. **ABAC:** department, owner, expense status. **DAC/MAC:** other models, not the primary ExpenseGuard policy.
+- **PDP / PEP:** Policy Decision Point = computes allow/deny. Policy Enforcement Point = prevents disallowed operations. ExpenseGuard calls `authorize(...)` **before** any expense-status mutation.
+- **Least privilege, default deny, separation of duties (SoD):** A manager cannot approve their own expense. **JIT/JEA** are useful access concepts, not implemented ExpenseGuard features.
+- **AuthN:** Argon2id password hashes, dummy password verification for missing users, unpredictable opaque bearer tokens, SHA-256 token hashes in server-side sessions, expiry/logout revocation, never `X-User-ID` auth.
+- **401 vs 403:** Authentication missing/invalid versus authenticated but forbidden. **BOLA/IDOR:** Changing an expense ID must not expose someone else's record.
+- **OWASP API6:** Legitimately allowed workflows abused at scale/sequence (business-flow abuse), distinct from unauthorized-object access (BOLA). Rate limits/business safeguards complement authentication and authorization.
+- **Still absent:** Real receipt upload/download, password reset, tenant isolation, MFA enforcement, OAuth/OIDC validation and production persistence. Don't derive future password-reset links from untrusted Host headers.
+
+### 5.10 IAM interview flashcards (answer before reading)
+
+1. **Who is "the identity" when FastAPI calls S3?** Usually the ECS **task-role session**, NOT the logged-in ExpenseGuard employee.
+2. **What does ECS Fargate do?** Runs ECS tasks on managed compute; ECS controls task orchestration/desire count; Docker/OCI image packages the app.
+3. **Why separate ECS task and execution roles?** Task = business code's AWS APIs (e.g. S3); execution = ECS task startup integration (ECR, logs, task-definition secrets).
+4. **Trust policy vs permissions policy?** Trust: who may assume role via STS. Permissions: what API actions/resources that role/session can use.
+5. **IAM `s3:GetObject` allowed; employee gets coworker's receipt—root cause?** Application-level BOLA: receipt ownership/authorization wasn't enforced.
+6. **Implicit deny vs explicit deny?** No matching permission versus a matching `Deny` statement; explicit deny overrides allow.
+7. **One ECS service with five tasks: five roles?** Not necessarily; multiple tasks can share one task-role definition with temporary role sessions.
+8. **How do we authenticate to RDS PostgreSQL?** Network access + DB credentials or separately configured IAM DB authentication; task role alone doesn't open database connections.
+9. **Why no embedded AWS access key in Docker/GitHub?** Long-lived secrets leak easily; use ECS role temporary credentials or GitHub OIDC role assumption.
+10. **What did we actually do in AWS?** Secured account root with MFA, configured alert, navigated simulator to Custom. **Policy Allow/Deny experiment and cloud deployment are NOT yet performed.**
+
+**One-sentence summary for interviews:** "I distinguish application users from AWS principals; ExpenseGuard validates the user's business permission first, then calls AWS through a least-privilege task role with temporary credentials. I separate trust from permissions, execution roles from task roles, and test allow/deny decisions without assuming a green policy simulation proves production security."
+
+**Further reading (AWS official documentation):**
+- [AWS IAM policy evaluation](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_evaluation-logic.html)
+- [AWS explicit vs implicit deny](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_evaluation-logic_AccessPolicyLanguage_Interplay.html)
+- [AWS IAM JSON policy elements](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies.html)
+- [IAM Policy Simulator — Custom mode](https://docs.aws.amazon.com/IAM/latest/UserGuide/policies_policy-simulator-how-to.html)
+- [ECS task and execution IAM roles](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/security-ecs-iam-role-overview.html)
+- [ECS task-role credentials](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task-iam-roles.html)
+- [RDS authentication methods](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/database-authentication.html)
+
 
 ## 6. Threat modeling, secure development, and the cloud roadmap
 
@@ -275,8 +482,10 @@ Current:    Local FastAPI + demo memory store + tested AuthN/AuthZ
 CI passing: Pytest / Gitleaks / pip-audit / authenticated Semgrep
 Container:  hardened Docker build + Trivy report + CycloneDX SBOM + fixable HIGH/CRITICAL gate
 CI pending: real SonarQube scanner configuration; broader required-check policy
-Next:      threat modeling + SSDLC, then Terraform/IaC + AWS/IAM
-Later:     secure app features / tenant isolation / DAST / optional AI security
+AWS IAM:   learning notes + architecture model; account MFA/budget configured
+Lab next:  IAM Policy Simulator Custom mode: simulated Allow/Deny (not yet run)
+Cloud:     no AWS infrastructure deployed; Paid plan, $0 credits, no cost approval
+Later:     Terraform/IaC, AWS implementation, threat modeling/SSDLC artifacts, DAST
 ~~~
 
 Useful commands (inside the project directory):
