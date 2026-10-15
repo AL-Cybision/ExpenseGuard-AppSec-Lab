@@ -597,4 +597,143 @@ python -m pytest -q                             # regression tests
 **Official references:** [IAM evaluation](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_evaluation-logic.html) · [IAM simulator](https://docs.aws.amazon.com/IAM/latest/UserGuide/access_policies_testing-policies.html) · [ECS task role](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task-iam-roles.html) · [Fargate limitations](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/fargate-tasks-services.html) · [CloudTrail history](https://docs.aws.amazon.com/awscloudtrail/latest/userguide/view-cloudtrail-events.html) · [Terraform validate](https://developer.hashicorp.com/terraform/cli/commands/validate) · [Checkov](https://github.com/bridgecrewio/checkov).
 
 
+## 9. AppSec engineering completion — lessons for resume and portfolio readiness
+
+> **Curriculum prepared 2026-10-15, not all exercises executed.** The companion **19-page PDF**, *ExpenseGuard_AppSec_Completion_Lessons.pdf*, contains seven detailed lessons, local lab commands, insecure/secure examples, templates, evidence matrices and 20 interview questions. It was delivered separately in our chat (not committed to GitHub). **Knowledge-material completion is not implementation verification.** We can now prioritize honest portfolio, resume and interview work while tracking remaining hands-on artifacts as gaps.
+
+### 9.1 Terraform foundation (lesson prepared; lab not verified)
+
+**Goal:** Explain infrastructure as code, provider, resource, data source, state, plan and apply; validate local configuration without creating AWS resources.
+
+- §terraform fmt -check§ checks formatting; §terraform validate§ checks configuration syntax/internal consistency, **not security** or live cloud exposure.
+- §terraform init -backend=false§ prepares provider/module requirements for validation without initializing the configured backend. It may still download provider/module code; review dependencies first.
+- §terraform plan§ proposes changes and may read AWS/provider state. §terraform apply§ can create billable resources and **requires separately approved cost review**.
+- Protect §*.tfstate§, §.terraform/§, sensitive variable files, plan outputs and backend credentials. Review provider pin/§.terraform.lock.hcl§. Keep AWS keys out of code and CI.
+- **Safe lab:** Temporary local directory with Terraform's built-in §terraform_data§ resource (no AWS provider); run fmt/init/validate, capture actual stdout. Do not invent a successful execution.
+
+~~~bash
+mkdir -p /tmp/expenseguard-terraform-basics
+cd /tmp/expenseguard-terraform-basics
+# Create a main.tf with terraform_data (see PDF for example)
+terraform fmt -check
+terraform init -backend=false
+terraform validate
+~~~
+
+### 9.2 Checkov + AWS misconfiguration review (lesson prepared; lab not verified)
+
+**Goal:** Find and fix unsafe Terraform before deployment. Analyze whether the vulnerable configuration is actually reachable, not merely a scanner label.
+
+- Deliberately unsafe example: PostgreSQL ingress port **5432** from §0.0.0.0/0§; potential exposure depends on routing, IP assignment and other controls.
+- Safer principle: private RDS + PostgreSQL ingress **only from the ECS application security group**, encryption, authentication and appropriate egress.
+- **Local CLI:** §checkov -d ./terraform --framework terraform§ (point at a deliberately unsafe scratch folder). Checkov static scans do **not** require AWS resources.
+- Record Checkov check ID and affected HCL, source/root cause, attack prerequisites, business impact, fix, rescan and regression.
+- A §checkov:skip§ annotation is **not** sufficient risk acceptance: require specific exception reason, owner, approver, scope, compensating controls and expiration.
+
+~~~hcl
+# Deliberately INSECURE educational SG ingress example; NEVER apply
+ingress {
+  from_port   = 5432
+  to_port     = 5432
+  protocol    = "tcp"
+  cidr_blocks = ["0.0.0.0/0"]
+}
+~~~
+
+### 9.3 ZAP DAST + FastAPI OpenAPI (lesson prepared; scanner not run)
+
+**Goal:** Inspect the **running** API, save evidence, reproduce findings, and distinguish automatic scanning from authenticated business-logic testing.
+
+- FastAPI exposes §/openapi.json§. ZAP API Scan imports it; the normal API scan uses active testing. §-S§ selects **safe mode**, skipping the active scanner.
+- Start with a disposable **local Docker network** and test data. A ZAP container cannot reach the host's §127.0.0.1§ unless networking is deliberately configured; a second container can be reached by name on a shared user-created network.
+- **First pass, safe mode:** §zap-api-scan.py -t http://expenseguard-zap:8000/openapi.json -f openapi -S§ using a ZAP image on the same network.
+- **Active scan** only after explicit authorization and prepared disposable fixtures, because POST/PUT/DELETE endpoints can mutate state, lock accounts or trigger business flows.
+- Authenticated coverage requires a valid session context, role-aware requests and negative assertions. A scanner returning 401 on all protected endpoints does not prove AuthZ safe.
+- Test owner vs unrelated employee, cross-department manager, manager's own-expense approval, invalid/expired token and **no mutation after denial**.
+- Save actual alerts/request-response evidence; validate manually and retest after remediation. Start ZAP CI as report-only while tuning.
+
+~~~bash
+docker network create expenseguard-zap-lab
+docker build -t expenseguard:zap .
+docker run -d --name expenseguard-zap \
+  --network expenseguard-zap-lab expenseguard:zap
+docker run --rm --network expenseguard-zap-lab \
+  ghcr.io/zaproxy/zaproxy:stable \
+  zap-api-scan.py \
+  -t http://expenseguard-zap:8000/openapi.json -f openapi -S
+~~~
+
+**Security limitation:** API scans are no substitute for server-side object-level ownership checks or source-to-sink analysis.
+
+### 9.4 CI/CD security gates + required PR checks (policy lesson prepared)
+
+**Existing controls:** Pytest/security regression tests, authenticated Semgrep CI, Gitleaks, pip-audit, hardened Docker image/smoke test, Trivy full report + CycloneDX SBOM, Trivy gate on *fixable* HIGH/CRITICAL image vulnerabilities. The Oct 7 Trivy checkpoint reported 171 findings, 44 HIGH with no fixed version. **Passing a gate means the specified policy passed, not zero vulnerabilities.**
+
+**Not verified/implemented:** ZAP scan in CI, Checkov scan in CI, centralized release policy and enforced required branch checks. SonarQube's actual scanner step was previously skipped despite a green workflow.
+
+- Policy starts with **detected → investigated → reproducible → risk-ranked**. CVSS label alone is not a universal shipping decision.
+- Candidate gate: confirmed live secrets → block/revoke; validated exploitable SAST → block; reachable critical fixable SCA → block; fixable HIGH/CRITICAL Trivy → existing block; serious verified IaC exposure → block; high-confidence reproducible DAST → block when coverage stable.
+- Upstream-unfixed findings require tracking/mitigation or approved exceptions; a green workflow alone must not cause silent acceptance.
+- **GitHub branch rules** must require actual checks to stop merges. Distinguish failing job from enforced branch protection. Watch for skipped or path-filtered workflows selected as required checks.
+- Enforce least-privilege §GITHUB_TOKEN§, reviewed full-SHA action pins, safe PR trust boundaries, short-lived cloud OIDC credentials and artifact retention.
+
+**Required evidence before claiming operational gate:** Screenshot/record of required checks on target branch, proof the critical check executes on relevant PRs, and proof a failing check actually blocks merging.
+
+### 9.5 Vulnerability management, ownership and exceptions (templates prepared)
+
+~~~text
+Alert → deduplicate → validate exploitability → risk-ranked finding
+  → assign dev/risk owner & due date → fix or compensate
+  → regression test + scan → verify → close with evidence
+~~~
+
+Every meaningful finding should provide **description, vulnerable code/config, source-to-sink or attack path, preconditions, impact, severity rationale, root cause, secure alternative, regression tests, verification, and owner/due date**.
+
+**Time-bound exception template:** finding ID, affected asset/digest, exact reason, risk owner, approver, reachability evidence, compensating controls, remediation plan, expiration, review cadence and tracking issue. Do not use an inline scanner suppression as a substitute for approval. Example SLAs (Critical 7 days, High 30, Medium 90, Low 180) are only *illustrative* and must be adopted by an organization before claiming they are policy.
+
+### 9.6 Final AppSec assessment + realistic gap ledger (template prepared)
+
+**What we can demonstrate from existing project:** FastAPI authentication and centralized RBAC/ABAC, regression tests, source/secret/dependency checks, Docker hardening, Trivy, SBOM and documentation.
+
+**What must NOT be implied as already implemented:** PostgreSQL/SQLAlchemy persistence, receipt upload/download, production audit log pipeline, AWS ECS/RDS/S3 deployment, Terraform files, Checkov scan reports, ZAP scan reports, enforced release PR checks, and a signed full AppSec assessment.
+
+**Assessment outline:** scope + tested commit/date → architecture/assets/trust boundaries → methodology and excluded surfaces → verified findings (severity rationale/evidence) → fixes/regressions → controls matrix → residual risks → prioritized backlog → sign-off/review owners.
+
+**Portfolio evidence packet:** 1 architecture diagram labeled *current vs planned*; 2-3 sanitized reproducible findings with secure patches and negative regression tests; CI job evidence including skipped steps; Trivy/SBOM artifacts; IAM design/trust-vs-permission explanation; developer checklist; accurate open gaps.
+
+### 9.7 Developer enablement, PR checklist and interview defense (templates prepared)
+
+**One-page secure coding principles:** derive user identity from verified session, authorize every object/action before side effects, deny by default, prevent same-user expense approval, handle files and S3 object keys safely, avoid logging secrets/tokens/presigned URLs, use prepared DB operations, isolate runtime credentials, minimize dependencies and write positive/negative tests.
+
+**PR checklist:**
+- [ ] Entry points, assets and trust boundaries identified
+- [ ] AuthN/ownership/role/department checks occur *before* data access/mutation
+- [ ] Negative regression tests prove no side effects after denied access
+- [ ] File upload, validation, sessions, errors and logging reviewed where relevant
+- [ ] Secrets, dependencies, images, Terraform/CI changes reviewed
+- [ ] Scanner findings triaged; exceptions have risk owner/expiry
+- [ ] Required CI steps actually executed; skipped scans are visible
+
+**Release checklist:** commit/tag/image digest; required branch checks; fix/accepted risk ledger; reviewed secrets/IAM/SG; tested rollback and logging; approved cloud costs. A container SBOM is not a vulnerability scan; an IAM Allow is not app-level BOLA protection.
+
+**Interview questions to rehearse:**
+1. Why isn't §terraform validate§ a cloud security scan?
+2. What is the difference between Checkov policy violations and exploitability?
+3. How does ZAP import the FastAPI OpenAPI specification, and why start passive?
+4. Why can't unauthenticated DAST establish BOLA resistance?
+5. How do you separate a CI security gate from branch-rule enforcement?
+6. Why can an image with 44 HIGH findings pass a fixable-only Trivy gate?
+7. How do you defend a justified, expiring risk acceptance?
+8. How do you get a developer to implement the **root-cause fix**, not merely suppress a finding?
+9. What can be claimed as *implemented and verified* in ExpenseGuard today?
+10. Which security evidence remains open before claiming production-ready deployment?
+
+### 9.8 Transition decision and honest learning-completion status
+
+**Learning curriculum:** AWS study guide (created separately) + the seven remaining AppSec lessons above **prepared**. We may transition to **resume, portfolio and interviews immediately**, practicing these concepts through interview questions and code reviews.
+
+**Not the same as practical certification:** No Terraform/Checkov/ZAP executions or AWS deployment were performed just by generating this PDF. Treat those as explicit evidence gaps; do **not** fabricate scans, tests, findings or production experience in a CV.
+
+**References:** [Terraform validate](https://developer.hashicorp.com/terraform/cli/commands/validate) · [Checkov CLI](https://www.checkov.io/2.Basics/CLI%20Command%20Reference.html) · [ZAP API Scan](https://www.zaproxy.org/docs/docker/api-scan/) · [ZAP Docker networking](https://www.zaproxy.org/docs/docker/about/) · [GitHub required rules](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/available-rules-for-rulesets) · [OWASP WSTG](https://owasp.org/www-project-web-security-testing-guide/).
+
 **Notebook convention:** Append short, verified lessons after each milestone. Label **implemented**, **tested**, and **planned** honestly; revise dated status claims rather than presenting them as permanent truths.
