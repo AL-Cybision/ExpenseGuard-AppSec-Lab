@@ -432,19 +432,28 @@ flowchart TD
 - **Risk acceptance** is a documented, approved, time-limited exception rather than silently disabling checks.
 - **Release/deployment** is separate from running a source-code scan: no automatic deployment exists today.
 
-## 10. Planned AppSec learning milestones
+## 10. Learning roadmap and portfolio evidence
 
-| Workstream | Evidence we want |
+**Learning materials prepared:** The AWS IAM/Terraform workbook and our separate **19-page ExpenseGuard AppSec Engineering Completion Lessons PDF** cover the remaining study syllabus: Terraform, Checkov, ZAP DAST, release gates, vulnerability management, final AppSec assessment, developer enablement and interview practice. The PDF was delivered separately in ChatGPT, **not committed as a repository file**. Core explanations and lab commands are preserved in [learning.md (Section 9)](learning.md#9-appsec-engineering-completion--lessons-for-resume-and-portfolio-readiness).
+
+**This marks the learning curriculum as packaged for review, not every practical skill as tested.** The next emphasis is making a truthful resume, portfolio evidence index and interview preparation. Every strong bullet should link to actual code, a passing/failed check, a controlled reproduction, or an explicitly labelled architecture/design artifact.
+
+| Workstream | Evidence and status |
 | --- | --- |
-| **Current: finish CI/CD security** | Authenticated Semgrep CI, dependency and secret checks, validated findings, Action SHA pinning, reviewed policies. |
-| **Application hardening** | Secure password reset, rate-limiting approach, security logging, secure file upload/download and tests. |
-| **Tenant isolation / OAuth & OIDC** | Organization membership model, cross-tenant access tests, validated tokens/scopes/audiences and clear trust boundaries. |
-| **Threat modeling and SSDLC** | Data-flow diagrams, STRIDE threats, abuse cases, security requirements, release/PR checklists and risk register. |
-| **Docker / Trivy / SBOM** | Insecure vs hardened image, image-scan comparisons and component inventory. |
-| **Terraform / AWS** | Reviewable VPC/ECS/RDS/S3/IAM configuration, IaC findings, least-privilege roles, logs and cost-aware plan. |
-| **DAST and gates** | Authenticated staging tests where possible, severity and exception process, evidence from CI. |
-| **Optional AI Product Security** | Expense policy assistant with authorization-aware retrieval, indirect prompt-injection and cross-tenant leakage tests. |
-| **Portfolio assessment** | Findings, fixes, regression tests, architecture decisions, security review and interview-ready explanations. |
+| **Web/API secure code review** | Existing research strength; ExpenseGuard authentication, RBAC/ABAC and security regression tests are implemented. |
+| **Core CI security** | Pytest, Gitleaks, authenticated Semgrep and pip-audit configured and verified at earlier checkpoints. |
+| **Container and supply chain** | Hardened Docker build, CI smoke test, Trivy scan/gate and CycloneDX SBOM implemented; vulnerability limitations documented. |
+| **Threat modeling and SSDLC** | Knowledge acknowledged; application-specific DFD, STRIDE register and policy deliverables remain deferred, **not claimed complete**. |
+| **AWS IAM and cloud design** | Detailed learning guide and conceptual architecture; fictional S3 custom policy added to simulator; simulation results and cloud deployment **not yet verified**. |
+| **Terraform / Checkov** | Hands-on instructions and insecure/secure examples prepared; **no Terraform implementation or Checkov evidence in this repo yet**. |
+| **OWASP ZAP / DAST** | Local OpenAPI testing procedure prepared; **no actual ExpenseGuard ZAP report yet**. |
+| **Security gates / vulnerability operations** | Existing Trivy gate and scanner workflows; risk/exception policy documented as a template. Required branch checks and complete governance process **not verified**. |
+| **Final AppSec assessment / developer enablement** | Assessment outline, developer secure coding checklist, review checklist, triage and remediation templates prepared; adoption/final findings report **not yet evidenced**. |
+| **Portfolio and interviews** | **Next phase:** map accomplishments to evidence, improve README, produce resume bullets and practice architecture, IAM and DevSecOps defenses. |
+
+**Remaining application gaps:** The current app uses in-memory sessions/expenses. PostgreSQL + migrations, receipt upload/download, account recovery, durable audit logging and production cloud controls are still planned. They are not implied by the curriculum's completion.
+
+**Zero-spend cloud boundary:** AWS is a **Paid plan without credits**; a zero-spend budget is an alert, not a hard limit. The proposed Terraform/Checkov/ZAP labs run locally first. No cloud resources will be deployed without a separate approved cost estimate.
 
 ## 11. Known limitations and honest security boundaries
 
