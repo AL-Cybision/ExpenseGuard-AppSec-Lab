@@ -371,6 +371,25 @@ The arrows describe **authorization concepts**, not literal standalone HTTP call
 
 For policy JSON examples, user-versus-task-role explanations, simulator instructions, limitations and interview Q&A, see [**learning.md — Section 5, AWS IAM**](learning.md#5-aws-iam--expenseguard-mental-model-labs-and-interview-guide). Official guides: [AWS IAM policy evaluation](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_evaluation-logic.html) and [Amazon ECS task and execution roles](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/security-ecs-iam-role-overview.html).
 
+### AWS and Terraform eight-lesson learning plan
+
+The project follows a **hands-on but zero-spend-first** AWS AppSec curriculum. Full concepts, simulator examples, HCL/Checkov exercises, cost constraints and interview checkpoints are recorded in [learning.md — Section 8](learning.md#8-aws-application-security--terraform--eight-lesson-practical-workbook). A separate **21-page companion PDF** has also been prepared for offline study (not committed to this repository).
+
+| Lesson | Practical outcome | Actual status |
+| --- | --- | --- |
+| 1. IAM policies | Simulate `s3:GetObject` Allow and `s3:DeleteObject` implicit Deny | **In progress:** selected custom policy; results not yet run |
+| 2. STS + roles | Review temporary credentials, trust policy, task vs execution roles | Design study; **no live roles** |
+| 3. VPC | Trace ALB → private ECS → private RDS, review SG boundaries | **Planned**, not deployed |
+| 4. S3 + secrets | Secure receipt objects, presigned URLs, secret retrieval | **Planned**, no buckets/secrets |
+| 5. ECS Fargate/ECR | Review task definition, image digest and container controls | Docker/Trivy implemented; **no cloud task** |
+| 6. Logs | Read existing CloudTrail history and design app audit logs | **Review pending**; no new logging services |
+| 7. Terraform | Validate configurations locally, without apply | **Planned**, no Terraform files |
+| 8. Checkov | Scan deliberately unsafe IaC and document secure fixes | **Planned**, no IaC scan yet |
+
+**Account safety:** The learning AWS account is on a **Paid plan with no credits**, root MFA enabled and a zero-spend budget alert configured. A budget alert **does not block charges**. No real billable AWS resources or services will be created without a cost estimate and specific approval.
+
+**Most recent IAM evidence:** The console shows selected `ExpenseGuard-GetObjectPolicy` in IAM Policy Simulator **Custom mode** and **Simulation results (0)**. Therefore, reading/deletion permissions have **not yet been empirically simulated**. The policy can authorize an AWS API call but cannot itself delete any file.
+
 ### Why ECS first, not Kubernetes?
 
 Kubernetes is useful for securing complex cluster-based environments, but it introduces significant operational scope. The primary project targets **AppSec, CI/CD, IAM and cloud architecture**, so ECS Fargate is the planned main deployment. A small local Kubernetes **kind/k3d** workload-security exercise can follow as a stretch project; it is **not** a current feature.
