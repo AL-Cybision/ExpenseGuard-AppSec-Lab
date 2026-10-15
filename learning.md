@@ -1,6 +1,6 @@
 # Learning — ExpenseGuard AppSec & DevSecOps
 
-> **Living learning notebook / source of truth for concepts.** Updated: **2026-10-14**. This records what we learned, why it matters, and what is **implemented versus planned**. For onboarding and diagrams, see [README.md](README.md). For the real state of CI, consult the [GitHub Actions runs](https://github.com/AL-Cybision/ExpenseGuard-AppSec-Lab/actions); a green workflow can contain a skipped scanner.
+> **Living learning notebook / source of truth for concepts.** Updated: **2026-10-15**. This records what we learned, why it matters, and what is **implemented versus planned**. For onboarding and diagrams, see [README.md](README.md). For the real state of CI, consult the [GitHub Actions runs](https://github.com/AL-Cybision/ExpenseGuard-AppSec-Lab/actions); a green workflow can contain a skipped scanner.
 >
 > **Learning rule:** For each control, explain **problem → attacker scenario → implementation → verification → remaining risk**. A scanner alert is a lead to investigate, not proof of exploitability; a passing scan is not proof of security.
 
@@ -396,15 +396,16 @@ In our **isolated custom-policy simulation**, with only the illustrative `s3:Get
 
 **Account constraints:** AWS **Paid plan**, **$0 credits**; root MFA enabled; zero-spend budget alert enabled. **Never mistake a budget alert for a hard cap.** Avoid S3 buckets, ECS tasks, NAT gateways, ALBs, EC2, RDS, CloudWatch paid features and third-party offerings without a separate cost estimate and explicit approval.
 
-**Progress confirmed from the user's AWS console screenshots:** IAM → **Policy simulator** → **Custom** mode selected. Left panel shows `Identity-based policies (0)` with **+ Add policy**. No policy simulation result has been shown yet.
+**Progress confirmed from the AWS console screenshots:** IAM → **Policy simulator → Custom**, with a policy named `ExpenseGuard-GetObjectPolicy` selected. It allows `s3:GetObject` only on `arn:aws:s3:::expenseguard-iam-lab-example/receipts/*`. After **Back to simulator**, the console showed **Identity-based policies (1/1)** and **Simulation results (0)**. The Allow/Deny actions have **NOT** been simulated yet.
 
 **Next controlled steps** (perform one at a time, with screenshots/verification):
 
-1. In **Custom**, select **+ Add policy** and paste the **fictional S3 read-only identity-based policy** from `5.5`.
-2. Add action `s3:GetObject` and set object resource to `arn:aws:s3:::expenseguard-iam-lab-example/receipts/123.pdf`; simulate. Expected **Allowed**.
-3. Add `s3:DeleteObject` for the same object; simulate. Expected **Implicit deny**.
-4. Change the object ARN to the `other/` prefix and simulate GetObject. Expected **Implicit deny**.
-5. Inspect **Result details**. **Record the actual results only after we perform the simulator run.** Unexpected results require investigating the exact context, not inventing success.
+1. Keep the **already-added and selected** policy in Custom mode and click **Add actions**.
+2. Simulate `s3:GetObject` on `arn:aws:s3:::expenseguard-iam-lab-example/receipts/123.pdf` (expected **Allowed**).
+3. Simulate `s3:DeleteObject` on the same object (expected **Implicit deny**).
+4. Change GetObject to `other/123.pdf` (expected **Implicit deny**, because the prefix differs).
+5. Optionally add a second Allow policy limited to `s3:DeleteObject` on `receipts/s7.pdf`; test `s7.pdf` and `123.pdf`. **An Allow only permits an API request; it does not delete an object by itself.**
+6. Inspect **Result details**. Record results **only after they actually appear**; review the decision context if unexpected.
 
 **Why Custom mode?** Tests pasted identity-based policies **without creating/attaching a user or role**. This is an IAM **policy simulation**, not a real S3 API call or proof that the same decision will occur in a complex production environment. The console Custom mode cannot fully simulate arbitrary S3 bucket policies or custom organization SCPs; use appropriate advanced tools and real-world verification later. **No real S3 bucket is needed.**
 
@@ -483,7 +484,7 @@ CI passing: Pytest / Gitleaks / pip-audit / authenticated Semgrep
 Container:  hardened Docker build + Trivy report + CycloneDX SBOM + fixable HIGH/CRITICAL gate
 CI pending: real SonarQube scanner configuration; broader required-check policy
 AWS IAM:   learning notes + architecture model; account MFA/budget configured
-Lab next:  IAM Policy Simulator Custom mode: simulated Allow/Deny (not yet run)
+Lab next:  IAM Custom policy added; Add actions/Allow-Deny simulation pending
 Cloud:     no AWS infrastructure deployed; Paid plan, $0 credits, no cost approval
 Later:     Terraform/IaC, AWS implementation, threat modeling/SSDLC artifacts, DAST
 ~~~
@@ -507,5 +508,93 @@ python -m pytest -q                             # regression tests
 - [GitHub: Dependabot cooldown options](https://docs.github.com/en/code-security/reference/supply-chain-security/dependabot-options-reference)
 - [GitHub: How Dependabot version updates work](https://docs.github.com/en/code-security/concepts/supply-chain-security/dependabot-version-updates)
 - [FastAPI: Version pinning and Starlette guidance](https://fastapi.tiangolo.com/deployment/versions/)
+
+## 8. AWS Application Security + Terraform — eight-lesson practical workbook
+
+> **Study companion created 2026-10-15:** A separate **21-page PDF** titled *ExpenseGuard AWS Application Security — IAM + Terraform* includes eight detailed lessons, practical steps, policy JSON, Terraform/Checkov examples, security-review cases, drills and evidence worksheets. The PDF was delivered separately, **not uploaded to this repository**. These notes preserve the key concepts and status without requiring old chat transcripts.
+
+**Mandatory cost boundary:** The AWS account is on a **Paid plan with $0 remaining credits**. Root MFA is enabled; a zero-spend budget alert is configured but is **not a spending cap**. Simulated IAM requests, local code/IaC scans and existing read-only account views come first. **No new billable infrastructure or services without a specific cost estimate and explicit approval.** In particular do not create ECS/Fargate tasks, ALBs, RDS, NAT Gateways, S3 objects, ECR repositories, Secrets Manager secrets, CloudWatch log collection, public IPv4 addresses or VPC endpoints during the following simulation/local labs.
+
+### 8.1 IAM fundamentals — actual Policy Simulator exercise (in progress)
+
+- **Request = principal + action + resource + context**. AWS authorizes API operations by evaluating all applicable policy types. No applicable Allow → **implicit deny**; a matching explicit Deny overrides Allow.
+- **Current observation:** Custom mode, selected `ExpenseGuard-GetObjectPolicy`, `Simulation results (0)`. The policy editor and selection are verified; Allow/Deny results are NOT verified yet.
+- **Lab:** Simulate `s3:GetObject` for fictional `receipts/123.pdf` (expected Allow), then `s3:DeleteObject` (expected implicit Deny), then GetObject for `other/123.pdf` (expected implicit Deny). Inspect matched statements.
+- **Extend:** A second Allow policy scoped to `s3:DeleteObject` on `receipts/s7.pdf` would permit that action only for the matching ARN under the isolated simulation. It **does not actually delete s7.pdf**.
+- **Security caveat:** Custom Simulator neither executes S3 requests nor fully reproduces arbitrary bucket policies, SCPs, context and running-system authorization. **Never invent observed results.**
+
+### 8.2 STS, role assumption, trust versus permissions, ECS role separation
+
+- **Trust policy = WHO may assume a role**: e.g., `Principal.Service: ecs-tasks.amazonaws.com` with `sts:AssumeRole`; apply AWS-recommended `aws:SourceAccount`/`aws:SourceArn` limits where supported.
+- **Permissions policy = WHAT AWS operations that role/session can perform**: e.g., `s3:GetObject` on a private receipt-object prefix. Trusting ECS does not automatically grant S3 access.
+- **STS/SDK flow:** ECS provides temporary task-role credentials; Boto3 signs AWS API calls. Avoid permanent AWS keys in Git, environment screenshots or Docker layers.
+- **Different roles:** **task role** for FastAPI SDK APIs; **task execution role** for task startup (ECR image pull, configured logs, task-definition secret injection); **CI deployment role** for future GitHub OIDC; separate workforce admin identity.
+- **Five ECS task replicas** can share one task-role definition with independent temporary credential sessions. Role count follows privilege boundaries, not employee count.
+- **Safe exercise:** Review fictional JSON trust/permissions policies, identify Principal/Action/Resource/Condition, reduce a wildcard and explain why a task execution role does not fix an app SDK S3 AccessDenied.
+
+### 8.3 VPC, public ALB, private ECS and RDS — network trust boundaries
+
+- **Proposed path:** Internet → public ALB HTTPS **443** → private ECS/ExpenseGuard **8000** → private RDS PostgreSQL **5432**.
+- **SG rules:** ALB ingress public 443; app ingress 8000 **from ALB SG**; RDS ingress 5432 **from app SG**. Review task public IP setting, route tables, subnet association, egress and NACL return traffic.
+- Public subnets have routes to an internet gateway; routability also depends on addresses and SGs. The app's private egress to ECR/S3/secrets may require NAT Gateway or VPC endpoints, potentially **billable**.
+- **Safe lab:** Create a DFD/SG table in a local note and classify Internet → ALB, Internet → RDS, ALB → app and app → DB as allowed/denied.
+- **Interview:** IAM alone does not allow database TCP connections. Secure DB access needs network boundaries, DB authentication, and TLS.
+
+### 8.4 S3 and Secrets Manager — what IAM does and does not secure
+
+- **Two separate authorization gates for receipts:** FastAPI checks which employee owns or may access the receipt (**BOLA/IDOR prevention**) **before** S3 access. AWS checks that the **backend task-role session** may call GetObject on the object ARN.
+- **S3 design:** Block Public Access enabled; scoped identity/bucket policies; private objects; SSE-S3 is enabled by default for new S3 objects; TLS; upload validation; appropriate activity evidence.
+- **Presigned URL:** Temporary bearer capability; only issue after business authorization, keep short expiry, protect from log/referrer leakage. An S3 prefix policy alone cannot map a receipt to the correct employee.
+- **Secret role nuance:** When ECS task definition references Secrets Manager, task **execution role** often retrieves the secret; when FastAPI code itself calls Secrets Manager, **task role** needs GetSecretValue. Secrets Manager is billable here, so do **not** create secrets.
+- **Safe lab:** Review the hypothetical route `subject → receipt lookup → owner check → S3 key → GetObject`. Write negative tests for a non-owner and forged object key. Use simulator only for the IAM half.
+
+### 8.5 ECS Fargate, ECR and task-definition security
+
+- **Docker/OCI image** packages ExpenseGuard; **ECR** stores the image; **ECS** orchestrates tasks and desired replica count; **Fargate** provides managed compute to run them.
+- **Review fields:** `taskRoleArn` vs `executionRoleArn`; `awsvpc` networking; private subnet/SG; appropriate CPU/memory; immutable image digest; `readonlyRootFilesystem`; logging; task-health/readiness; runtime secrets.
+- Existing **Docker/Trivy/SBOM CI** is implemented; its local `--read-only`/`--cap-drop=ALL`/`--tmpfs`/resource restrictions do **not** automatically deploy into Fargate. Fargate does **not** support privileged containers or `linuxParameters.tmpfs`. Translate supported controls correctly.
+- **Safe lab:** Review a static task-definition JSON and find broad task roles, mutable image tags, public reachability, plaintext secrets and unsupported settings. **No ECR image push or ECS task launch.**
+
+### 8.6 CloudTrail, CloudWatch and incident investigation
+
+- **CloudTrail Event history:** AWS management-event history view covering approximately 90 days, region-scoped, available to inspect without configuring a new paid trail. This is not guaranteed coverage of S3 object-level data events.
+- **CloudWatch Logs:** Planned for container/application logs; ingest, retention and storage can incur charges, so do not create groups/log streams in our zero-spend lab.
+- **Application audit logs:** Future ExpenseGuard must record business actor, action, object, decision and timestamp securely. CloudTrail AWS management events cannot prove which employee's authorization logic allowed a receipt download.
+- **Safe lab:** Inspect existing **CloudTrail → Event history** read-only. Examine principal, event name, time, source IP and request context. Don't enable paid data events, Lake, Config or other services.
+- **Interview:** Analyze suspicious sts:AssumeRole/IAM policy changes, correlate CI/deploy actions, then investigate actual API data access and business events separately.
+
+### 8.7 Terraform IaC — no-cost local configuration validation
+
+- **Terms:** provider, resource, data source, variable, state, `plan`, `apply`. Terraform code is proposed configuration; `apply` can create **billable AWS resources**.
+- **Safe local commands:** `terraform fmt -check -recursive`, `terraform init -backend=false`, `terraform validate`. Init may download plugins. Validate checks syntax/internal consistency; it does not prove security or check live AWS infrastructure.
+- **Caveat:** `terraform plan` may contact the AWS provider and require real credentials and state; use only after reviewing the backend/account. **Do not terraform apply.**
+- **State security:** never commit `*.tfstate`, `.terraform/` or plaintext credentials. Review `.terraform.lock.hcl` and provider version constraints.
+- **Safe lab:** In a local scratch directory define `aws_iam_policy_document` for a restricted receipt GetObject policy; run fmt/validate. This is not provisioning.
+
+### 8.8 Checkov, IaC triage and security gates
+
+- **Local command:** `checkov -d ./terraform --framework terraform` (or scan a dedicated local training folder). Static IaC scanning needs no AWS deployment.
+- **Deliberately vulnerable example:** DB SG allowing TCP **5432 from 0.0.0.0/0**. Safer design: private RDS and **only app SG** allowed inbound on 5432.
+- **Other review targets:** `Action: "*"` / `Resource: "*"`, broad role trust, public S3, disabled encryption/logging, public RDS, mutable image tags and embedded secrets.
+- **Developer finding:** root cause → realistic attack path/preconditions → impacted asset → severity rationale → minimal HCL fix → Checkov rescan → owner and time-limited exception (if warranted).
+- **Future pipeline:** Terraform fmt/validate → Checkov → validated review → required PR status check → separately approved deployment. A failing job alone doesn't prove merge protection is enforced.
+
+### Evidence and interview readiness
+
+| Lesson | Evidence to produce before marking practically complete |
+| --- | --- |
+| IAM | Real screenshot of expected Allowed/Implicit Deny simulation results |
+| Roles/STS | Separate trust/permissions policy review; task/execution-role mapping |
+| Network | DFD and SG allowed/denied path matrix |
+| S3/secrets | BOLA source-to-sink review and presigned URL abuse-case tests |
+| ECS | Fargate task-definition static review with runtime compatibility checks |
+| Logging | CloudTrail Event history read-only observations |
+| Terraform | Local fmt/validate output; no apply |
+| Checkov | A real local scan report, secure fix and rescan |
+
+**Interview takeaway:** “ExpenseGuard first authenticates and authorizes the human at the API boundary. Backend code then makes signed AWS calls with narrowly scoped temporary **task-role** credentials; execution-role and deployment-role permissions are separate. Private network design, S3/secret controls, IaC scanning and real testing provide additional defense in depth.”
+
+**Official references:** [IAM evaluation](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_evaluation-logic.html) · [IAM simulator](https://docs.aws.amazon.com/IAM/latest/UserGuide/access_policies_testing-policies.html) · [ECS task role](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task-iam-roles.html) · [Fargate limitations](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/fargate-tasks-services.html) · [CloudTrail history](https://docs.aws.amazon.com/awscloudtrail/latest/userguide/view-cloudtrail-events.html) · [Terraform validate](https://developer.hashicorp.com/terraform/cli/commands/validate) · [Checkov](https://github.com/bridgecrewio/checkov).
+
 
 **Notebook convention:** Append short, verified lessons after each milestone. Label **implemented**, **tested**, and **planned** honestly; revise dated status claims rather than presenting them as permanent truths.
